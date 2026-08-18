@@ -22,7 +22,12 @@ def severity_floor(
         return Severity.HIGH
     if rule == "dangling-reference" and dangling_kind in _SECRET_OR_CONFIG:
         return Severity.HIGH
-    if rule in {"broken-selector", "dangling-reference", "orphaned-ingress"}:
+    if rule in {
+        "broken-selector",
+        "dangling-reference",
+        "orphaned-ingress",
+        "mismatching-selector",
+    }:
         return Severity.MEDIUM
     return Severity.LOW
 

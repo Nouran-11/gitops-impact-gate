@@ -13,6 +13,7 @@ from impactgate.graph.edges import (
     selector_matches,
     service_selector,
     service_selects_workload,
+    workload_match_labels,
 )
 from impactgate.models import EdgeKind, Finding, Resource, Severity, compute_finding_id
 
@@ -44,8 +45,7 @@ def run_integrity_checks(
     before_findings: list[Finding] = []
     for check in CHECKS:
         before_findings.extend(check(before, before))
-    preexisting = {(item.rule, item.resource.key()) for item in before_findings}
-    return [item for item in after_findings if (item.rule, item.resource.key()) not in preexisting]
+    return drop_preexisting(after_findings, before_findings)
 
 
 def broken_selector(
@@ -144,12 +144,46 @@ def unreachable_workload(
     return findings
 
 
+def mismatching_selector(
+    graph: nx.DiGraph[str],
+    before: nx.DiGraph[str] | None = None,
+) -> list[Finding]:
+    """Workload selector.matchLabels must be a subset of pod template labels."""
+    del before
+    findings: list[Finding] = []
+    for _, data in graph.nodes(data=True):
+        if data.get("kind") not in SELECTS_WORKLOAD_KINDS or data.get("missing"):
+            continue
+        resource = data.get("resource")
+        if not isinstance(resource, Resource):
+            continue
+        match_labels = workload_match_labels(resource)
+        labels = pod_labels(resource)
+        if not match_labels or labels is None:
+            continue
+        if selector_matches(match_labels, labels):
+            continue
+        evidence = (
+            f"spec.selector.matchLabels {_format_selector(match_labels)} does not match "
+            f"pod template labels {_format_selector(labels)}"
+        )
+        findings.append(_finding("mismatching-selector", resource, evidence))
+    return findings
+
+
 CHECKS: tuple[Check, ...] = (
     broken_selector,
     dangling_reference,
     orphaned_ingress,
     unreachable_workload,
+    mismatching_selector,
 )
+
+
+def drop_preexisting(after: list[Finding], before: list[Finding]) -> list[Finding]:
+    """Keep findings that this snapshot introduced. Identity is (rule, resource key)."""
+    seen = {(item.rule, item.resource.key()) for item in before}
+    return [item for item in after if (item.rule, item.resource.key()) not in seen]
 
 
 def _finding(rule: str, resource: Resource, evidence: str) -> Finding:

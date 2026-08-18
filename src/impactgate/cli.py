@@ -10,6 +10,7 @@ import networkx as nx
 import typer
 
 from impactgate.analysis.impact import ImpactResult, compute_impact, to_gate_decision
+from impactgate.analysis.rules import drop_preexisting
 from impactgate.cache.store import CacheStats, CacheStore, parse_directory_cached
 from impactgate.config import load_settings
 from impactgate.graph.builder import build_graph
@@ -138,7 +139,7 @@ async def _run_analysis(
     result = compute_impact(before_graph, after_graph, files)
     if result.uncacheable and cache is not None:
         cache.stats.uncacheable = True
-    scanner_findings = await run_all_scanners(_scan_targets(after_dir, files), cache=cache)
+    scanner_findings = await _scanner_findings(after_dir, before_dir, files, cache)
     merged = result.model_copy(update={"findings": [*result.findings, *scanner_findings]})
     decision = to_gate_decision(merged)
     if not merged.findings:
@@ -175,6 +176,19 @@ def _scan_targets(after_dir: Path, changed: list[str]) -> list[Path]:
         if path.is_file() and path.suffix.lower() in {".yaml", ".yml"}:
             targets.append(path)
     return targets
+
+
+async def _scanner_findings(
+    after_dir: Path,
+    before_dir: Path | None,
+    changed: list[str],
+    cache: CacheStore | None,
+) -> list[Finding]:
+    after_findings = await run_all_scanners(_scan_targets(after_dir, changed), cache=cache)
+    if before_dir is None:
+        return after_findings
+    before_findings = await run_all_scanners(_scan_targets(before_dir, changed), cache=cache)
+    return drop_preexisting(after_findings, before_findings)
 
 
 def _human_review(parsed: ParseResult) -> GateDecision:
