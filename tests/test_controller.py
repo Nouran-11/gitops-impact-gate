@@ -19,11 +19,14 @@ from impactgate.controller.actions import (
     last_healthy_revision,
     scaled_memory,
 )
+from impactgate.controller.cluster import (
+    KubernetesClusterClient,
+    NullClusterClient,
+    workload_from_pod,
+)
 from impactgate.controller.policy import RemediationPolicy, default_policy, policy_from_crd
 from impactgate.controller.watcher import (
     Debouncer,
-    KubernetesClusterClient,
-    NullClusterClient,
     _decode_log_text,
     _logs_via_incluster,
     _logs_via_kubectl,
@@ -35,7 +38,6 @@ from impactgate.controller.watcher import (
     handle_failure,
     is_managed,
     read_pod_logs,
-    workload_from_pod,
 )
 
 NOW = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)

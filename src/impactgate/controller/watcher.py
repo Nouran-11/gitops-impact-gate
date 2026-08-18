@@ -20,12 +20,7 @@ from impactgate.controller.actions import (
     classify_failure,
     execute_action,
 )
-from impactgate.controller.cluster import (
-    KubernetesClusterClient as KubernetesClusterClient,
-    NullClusterClient as NullClusterClient,
-    attach_kubernetes_client,
-    workload_from_pod as workload_from_pod,
-)
+from impactgate.controller.cluster import NullClusterClient, attach_kubernetes_client
 from impactgate.controller.policy import RemediationPolicy, default_policy, policy_from_crd
 from impactgate.metrics import REGISTRY, start_http_server
 
@@ -214,7 +209,7 @@ def _decode_log_text(raw: object) -> str:
 
 
 def _logs_via_kubernetes(namespace: str, name: str, *, previous: bool) -> str:
-    from kubernetes import client, config  # type: ignore[import-not-found]
+    from kubernetes import client, config  # type: ignore[import-untyped]
 
     try:
         config.load_incluster_config()

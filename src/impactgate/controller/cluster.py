@@ -89,14 +89,9 @@ class KubernetesClusterClient:
         apps: Any | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
-        if core is None or apps is None:
-            self._core = core
-            self._apps = apps
-            self._injected = False
-        else:
-            self._core = core
-            self._apps = apps
-            self._injected = True
+        self._core: Any = core
+        self._apps: Any = apps
+        self._injected = core is not None and apps is not None
         self._clock = clock or (lambda: datetime.now(UTC))
         self.audits: list[AuditRecord] = []
 
@@ -132,8 +127,8 @@ class KubernetesClusterClient:
         return _decode_log_text(logs)
 
     def pod_events(self, namespace: str, pod: str) -> list[str]:
-        self._ensure_apis()
         try:
+            self._ensure_apis()
             listing = self._core.list_namespaced_event(
                 namespace,
                 field_selector=f"involvedObject.name={pod}",
@@ -156,8 +151,8 @@ class KubernetesClusterClient:
             if kind in WORKLOAD_KINDS and name:
                 return name
             if kind == "ReplicaSet" and name:
-                self._ensure_apis()
                 try:
+                    self._ensure_apis()
                     rs = _plain(self._apps.read_namespaced_replica_set(name, namespace))
                 except Exception:
                     return _strip_hash(name)
@@ -171,8 +166,8 @@ class KubernetesClusterClient:
         return [item.name for item in self.list_revisions(namespace, workload)]
 
     def list_revisions(self, namespace: str, workload: str) -> list[ReplicaSetRevision]:
-        self._ensure_apis()
         try:
+            self._ensure_apis()
             listing = self._apps.list_namespaced_replica_set(namespace)
         except Exception as exc:
             LOGGER.warning("replica sets unavailable in %s: %s", namespace, exc)
