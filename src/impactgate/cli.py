@@ -35,6 +35,37 @@ def _root() -> None:
 
 
 @app.command()
+def controller(
+    metrics_port: int | None = typer.Option(
+        None,
+        "--metrics-port",
+        help="Port for GET /metrics (default IMPACTGATE_METRICS_PORT or 8000).",
+    ),
+) -> None:
+    """Watch the cluster and remediate managed workloads.
+
+    Requires IMPACTGATE_CONTROLLER_ENABLED=true.
+    """
+    settings = load_settings()
+    if not settings.controller_enabled:
+        typer.echo(
+            "Refusing to start: set IMPACTGATE_CONTROLLER_ENABLED=true",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+    port = metrics_port if metrics_port is not None else settings.metrics_port
+    from impactgate.controller import watcher as _watcher
+    from impactgate.metrics import start_http_server
+
+    bound = start_http_server(port)
+    typer.echo(f"metrics listening on :{bound}/metrics")
+    _watcher._register_kopf()
+    import kopf
+
+    kopf.run(clusterwide=True, standalone=True)
+
+
+@app.command()
 def analyze(
     path: Path = typer.Argument(
         ...,

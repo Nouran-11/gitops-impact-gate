@@ -3,8 +3,6 @@ kind: Deployment
 metadata:
   name: payments
   namespace: demo
-  labels:
-    impactgate.io/managed: "true"
 spec:
   replicas: 1
   selector:
@@ -14,6 +12,7 @@ spec:
     metadata:
       labels:
         app: payments
+        impactgate.io/managed: "true"
     spec:
       containers:
         - name: payments

@@ -33,6 +33,7 @@ def test_defaults(monkeypatch: MonkeyPatch) -> None:
     assert settings.controller_enabled is False
     assert settings.no_cache is False
     assert settings.cache_dir == ".impactgate-cache"
+    assert settings.metrics_port == 8000
 
 
 def test_repo_config_file(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
@@ -65,6 +66,14 @@ def test_ollama_model_env(monkeypatch: MonkeyPatch) -> None:
     assert settings.ollama_model == "qwen2.5:7b"
 
 
+def test_metrics_port_env(monkeypatch: MonkeyPatch) -> None:
+    _clear_impactgate_env(monkeypatch)
+    monkeypatch.setenv("IMPACTGATE_METRICS_PORT", "9090")
+    settings = load_settings()
+    assert settings.metrics_port == 9090
+
+
 def test_cli_no_cache_flag(tmp_path: Path) -> None:
     settings = load_settings(repo_root=tmp_path, no_cache=True)
     assert settings.no_cache is True
+

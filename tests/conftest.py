@@ -1,9 +1,7 @@
-from __future__ import annotations
-
 import pytest
 
 from impactgate.llm import FakeProvider
-from impactgate.metrics import REGISTRY
+from impactgate.metrics import REGISTRY, stop_http_server
 
 
 @pytest.fixture(autouse=True)
@@ -21,3 +19,4 @@ def _reset_metrics() -> None:
     REGISTRY.reset()
     yield
     REGISTRY.reset()
+    stop_http_server()
