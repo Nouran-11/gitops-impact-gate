@@ -183,10 +183,15 @@ def test_controller_cli_documents_metrics_port() -> None:
     assert "--all-namespaces" in result.stdout
 
 
-def test_controller_cli_runs_kopf_against_demo(monkeypatch: MonkeyPatch) -> None:
+def _invoke_controller_cli(
+    monkeypatch: MonkeyPatch,
+    extra_args: list[str] | None = None,
+) -> tuple[Any, dict[str, object]]:
+    """Run `impactgate controller` without binding the live default port 8000."""
     import kopf
 
     from impactgate.cli import app
+    from impactgate.metrics import start_http_server as real_start
 
     captured: dict[str, object] = {}
 
@@ -200,7 +205,24 @@ def test_controller_cli_runs_kopf_against_demo(monkeypatch: MonkeyPatch) -> None
         "impactgate.controller.cluster.attach_kubernetes_client",
         lambda runtime: runtime.client,
     )
-    result = CliRunner().invoke(app, ["controller"])
+
+    def start_ephemeral(port: int = 8000, addr: str = "0.0.0.0") -> int:
+        del port, addr
+        return real_start(0, addr="127.0.0.1")
+
+    monkeypatch.setattr("impactgate.metrics.start_http_server", start_ephemeral)
+    args = ["controller", "--metrics-port", "0", *(extra_args or [])]
+    try:
+        result = CliRunner().invoke(app, args)
+    finally:
+        stop_http_server()
+    return result, captured
+
+
+def test_controller_cli_runs_kopf_against_demo(monkeypatch: MonkeyPatch) -> None:
+    import kopf
+
+    result, captured = _invoke_controller_cli(monkeypatch)
     assert result.exit_code == 0, result.output
     assert captured.get("clusterwide") is False
     assert captured.get("namespaces") == ("demo",)
@@ -210,23 +232,7 @@ def test_controller_cli_runs_kopf_against_demo(monkeypatch: MonkeyPatch) -> None
 
 
 def test_controller_cli_all_namespaces(monkeypatch: MonkeyPatch) -> None:
-    import kopf
-
-    from impactgate.cli import app
-
-    captured: dict[str, object] = {}
-
-    def fake_run(**kwargs: object) -> None:
-        captured.update(kwargs)
-
-    monkeypatch.setenv("IMPACTGATE_CONTROLLER_ENABLED", "true")
-    monkeypatch.setattr(kopf, "run", fake_run)
-    monkeypatch.setattr(kopf, "configure", lambda **_: None)
-    monkeypatch.setattr(
-        "impactgate.controller.cluster.attach_kubernetes_client",
-        lambda runtime: runtime.client,
-    )
-    result = CliRunner().invoke(app, ["controller", "--all-namespaces"])
+    result, captured = _invoke_controller_cli(monkeypatch, ["--all-namespaces"])
     assert result.exit_code == 0, result.output
     assert captured.get("clusterwide") is True
     assert "cluster-wide" in result.output
