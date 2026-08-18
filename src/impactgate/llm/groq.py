@@ -6,7 +6,7 @@ import os
 
 import httpx
 
-from impactgate.llm.provider import RateLimitError, retry_after_seconds
+from impactgate.llm.provider import PermanentError, RateLimitError, retry_after_seconds
 
 
 class GroqProvider:
@@ -25,7 +25,7 @@ class GroqProvider:
 
     async def complete(self, prompt: str, *, max_tokens: int = 1500) -> str:
         if not self.api_key:
-            raise RuntimeError("GROQ_API_KEY is not set")
+            raise PermanentError("GROQ_API_KEY is not set")
         headers = {"Authorization": f"Bearer {self.api_key}"}
         payload = {
             "model": self.model,

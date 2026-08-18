@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="IMPACTGATE_", extra="ignore")
 
     llm_provider: str = "gemini"
+    ollama_model: str = "llama3.1:8b"
     controller_enabled: bool = False
     no_cache: bool = False
     webhook_secret: str = ""

@@ -10,7 +10,13 @@ from collections.abc import Sequence
 from impactgate.analysis.severity import raise_only
 from impactgate.cache.store import CacheStore
 from impactgate.llm.prompts import STRICT_RETRY, render_prompt
-from impactgate.llm.provider import FakeProvider, Provider, ProviderError, build_provider
+from impactgate.llm.provider import (
+    FakeProvider,
+    PermanentError,
+    Provider,
+    ProviderError,
+    build_provider,
+)
 from impactgate.llm.schema import ModelBatch, ModelVerdict
 from impactgate.metrics import REGISTRY
 from impactgate.models import Finding, Verdict
@@ -179,6 +185,7 @@ __all__ = [
     "BATCH_SIZE",
     "DEGRADED_EXPLANATION",
     "FakeProvider",
+    "PermanentError",
     "PROMPT_VERSION",
     "Provider",
     "build_provider",

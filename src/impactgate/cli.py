@@ -64,7 +64,15 @@ def analyze(
     if not cache_root.is_absolute():
         cache_root = path / cache_root
     cache = CacheStore(cache_root, enabled=not settings.no_cache)
-    decision = asyncio.run(run_analysis(path, before, settings.llm_provider, cache=cache))
+    decision = asyncio.run(
+        run_analysis(
+            path,
+            before,
+            settings.llm_provider,
+            cache=cache,
+            ollama_model=settings.ollama_model,
+        )
+    )
     typer.echo(render_report(decision, cache_stats=cache.stats), nl=False)
 
 
@@ -75,6 +83,7 @@ async def run_analysis(
     *,
     cache: CacheStore | None = None,
     provider: Provider | None = None,
+    ollama_model: str | None = None,
 ) -> GateDecision:
     started = time.perf_counter()
     try:
@@ -84,6 +93,7 @@ async def run_analysis(
             llm_provider,
             cache=cache,
             provider=provider,
+            ollama_model=ollama_model,
         )
     finally:
         REGISTRY.record_analysis(time.perf_counter() - started)
@@ -97,6 +107,7 @@ async def _run_analysis(
     *,
     cache: CacheStore | None = None,
     provider: Provider | None = None,
+    ollama_model: str | None = None,
 ) -> GateDecision:
     if cache is not None:
         cache.stats = CacheStats()
@@ -132,7 +143,9 @@ async def _run_analysis(
     decision = to_gate_decision(merged)
     if not merged.findings:
         return _observe(decision)
-    llm = provider if provider is not None else build_provider(llm_provider)
+    llm = provider if provider is not None else build_provider(
+        llm_provider, ollama_model=ollama_model
+    )
     verdicts = await explain_findings(merged.findings, provider=llm, cache=cache)
     return _observe(_with_verdicts(decision, verdicts), merged.findings)
 

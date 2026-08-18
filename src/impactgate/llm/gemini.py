@@ -6,7 +6,7 @@ import os
 
 import httpx
 
-from impactgate.llm.provider import RateLimitError, retry_after_seconds
+from impactgate.llm.provider import PermanentError, RateLimitError, retry_after_seconds
 
 
 class GeminiProvider:
@@ -25,7 +25,7 @@ class GeminiProvider:
 
     async def complete(self, prompt: str, *, max_tokens: int = 1500) -> str:
         if not self.api_key:
-            raise RuntimeError("GEMINI_API_KEY is not set")
+            raise PermanentError("GEMINI_API_KEY is not set")
         url = (
             "https://generativelanguage.googleapis.com/v1beta/models/"
             f"{self.model}:generateContent"

@@ -2,9 +2,19 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+
+import httpx
+import pytest
 
 from impactgate.analysis.severity import raise_only
 from impactgate.llm import FakeProvider, explain_findings, parse_verdicts
+from impactgate.llm.provider import (
+    FallbackProvider,
+    PermanentError,
+    RateLimitError,
+    build_provider,
+)
 from impactgate.models import Finding, ResourceRef, Severity, compute_finding_id
 
 
@@ -83,3 +93,82 @@ def test_batch_returns_one_verdict_per_finding() -> None:
     verdicts = asyncio.run(explain_findings(findings, provider=provider))
     assert [item.finding_id for item in verdicts] == [item.id for item in findings]
     assert "Ingress" in verdicts[0].explanation
+
+
+class _Boom:
+    def __init__(self, name: str, error: Exception) -> None:
+        self.name = name
+        self.error = error
+        self.calls = 0
+
+    async def complete(self, prompt: str, *, max_tokens: int = 1500) -> str:
+        del prompt, max_tokens
+        self.calls += 1
+        raise self.error
+
+
+class _Ok:
+    name = "groq"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def complete(self, prompt: str, *, max_tokens: int = 1500) -> str:
+        del prompt, max_tokens
+        self.calls += 1
+        return '{"verdicts":[]}'
+
+
+async def _no_sleep(_delay: float) -> None:
+    return None
+
+
+def test_missing_api_key_is_not_retried_and_logged_once(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr("impactgate.llm.provider.asyncio.sleep", _no_sleep)
+    caplog.set_level(logging.WARNING, logger="impactgate.llm")
+    missing = _Boom("gemini", PermanentError("GEMINI_API_KEY is not set"))
+    ok = _Ok()
+    chain = FallbackProvider([missing, ok], max_attempts=3)
+    asyncio.run(chain.complete("first"))
+    asyncio.run(chain.complete("second"))
+    assert missing.calls == 1
+    assert ok.calls == 2
+    assert sum("unavailable" in rec.message for rec in caplog.records) == 1
+
+
+def test_rate_limit_retries_then_falls_back(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("impactgate.llm.provider.asyncio.sleep", _no_sleep)
+    limited = _Boom("gemini", RateLimitError(0))
+    ok = _Ok()
+    chain = FallbackProvider([limited, ok], max_attempts=3)
+    asyncio.run(chain.complete("hi"))
+    assert limited.calls == 3
+    assert ok.calls == 1
+
+
+def test_http_5xx_retries_then_falls_back(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("impactgate.llm.provider.asyncio.sleep", _no_sleep)
+    request = httpx.Request("POST", "https://example.test")
+    response = httpx.Response(503, request=request)
+    error = httpx.HTTPStatusError("server error", request=request, response=response)
+    failing = _Boom("gemini", error)
+    ok = _Ok()
+    chain = FallbackProvider([failing, ok], max_attempts=3)
+    asyncio.run(chain.complete("hi"))
+    assert failing.calls == 3
+    assert ok.calls == 1
+
+
+def test_build_provider_wires_ollama_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("IMPACTGATE_OLLAMA_MODEL", raising=False)
+    chain = build_provider("ollama")
+    assert isinstance(chain, FallbackProvider)
+    assert chain.providers[0].name == "ollama"
+    assert chain.providers[0].model == "llama3.1:8b"
+    monkeypatch.setenv("IMPACTGATE_OLLAMA_MODEL", "mistral:7b")
+    from_env = build_provider("ollama")
+    assert from_env.providers[0].model == "mistral:7b"
+    override = build_provider("ollama", ollama_model="qwen2.5:7b")
+    assert override.providers[0].model == "qwen2.5:7b"
