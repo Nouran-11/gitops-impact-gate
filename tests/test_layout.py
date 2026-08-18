@@ -23,6 +23,7 @@ REQUIRED_PATHS = [
     "src/impactgate/llm/ollama.py",
     "src/impactgate/llm/prompts.py",
     "src/impactgate/llm/schema.py",
+    "src/impactgate/prompting.py",
     "src/impactgate/cache/fingerprint.py",
     "src/impactgate/cache/store.py",
     "src/impactgate/report/markdown.py",
