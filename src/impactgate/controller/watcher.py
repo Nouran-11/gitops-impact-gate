@@ -7,9 +7,18 @@ from collections import defaultdict
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from typing import Any, Protocol
+from typing import Any
 
-from impactgate.controller.actions import Action, Diagnosis, classify_failure
+from impactgate.controller.actions import (
+    Action,
+    AuditRecord,
+    CircuitBreaker,
+    ClusterClient,
+    Diagnosis,
+    ReplicaSetRevision,
+    classify_failure,
+    execute_action,
+)
 from impactgate.controller.policy import RemediationPolicy, default_policy
 
 LOGGER = logging.getLogger("impactgate.controller")
@@ -24,16 +33,6 @@ WATCH_REASONS = {
     "Unhealthy",
     "BackOff",
 }
-
-
-class ClusterClient(Protocol):
-    def previous_logs(self, namespace: str, pod: str) -> str: ...
-
-    def pod_events(self, namespace: str, pod: str) -> list[str]: ...
-
-    def owning_workload(self, namespace: str, pod: Mapping[str, Any]) -> str: ...
-
-    def replicaset_history(self, namespace: str, workload: str) -> list[str]: ...
 
 
 @dataclass
@@ -67,6 +66,36 @@ class NullClusterClient:
     def replicaset_history(self, namespace: str, workload: str) -> list[str]:
         del namespace, workload
         return []
+
+    def list_revisions(self, namespace: str, workload: str) -> list[ReplicaSetRevision]:
+        del namespace, workload
+        return []
+
+    def rollback(self, namespace: str, workload: str, revision: str) -> str:
+        del namespace, workload
+        return f"rolled-back:{revision}"
+
+    def current_memory_limit(self, namespace: str, workload: str) -> str:
+        del namespace, workload
+        return "256Mi"
+
+    def bump_memory(self, namespace: str, workload: str, new_limit: str) -> str:
+        del namespace, workload
+        return f"memory-bumped:{new_limit}"
+
+    def restart(self, namespace: str, workload: str) -> str:
+        del namespace, workload
+        return "restarted"
+
+    def scale_out(self, namespace: str, workload: str) -> str:
+        del namespace, workload
+        return "scaled-out"
+
+    def emit_event(self, namespace: str, workload: str, message: str) -> None:
+        del namespace, workload, message
+
+    def record_audit(self, record: AuditRecord) -> None:
+        del record
 
 
 def compress_logs(raw: str, *, max_chars: int = 4000) -> str:
@@ -157,10 +186,11 @@ def handle_failure(
     client: ClusterClient,
     debouncer: Debouncer,
     policy: RemediationPolicy | None = None,
+    breaker: CircuitBreaker | None = None,
     logger: logging.Logger = LOGGER,
     now: datetime | None = None,
 ) -> Action | None:
-    """Diagnose, debounce, classify, and log the dry-run action. Returns None if skipped."""
+    """Diagnose, debounce, classify, apply guardrails, and act or dry-run."""
     if not is_managed(pod):
         logger.info("skipping unmanaged pod %s", (pod.get("metadata") or {}).get("name"))
         return None
@@ -171,15 +201,18 @@ def handle_failure(
         return None
     action = classify_failure(diagnosis)
     effective = policy if policy is not None else default_policy()
-    logger.info(
-        "dry-run: would %s on %s (reason=%s, mode=%s, allowed=%s)",
-        action.value,
-        key,
-        reason,
-        effective.mode,
-        [item.value for item in effective.allowed_actions],
+    record = execute_action(
+        diagnosis,
+        action,
+        effective,
+        client,
+        breaker=breaker,
+        now=now,
+        logger=logger,
     )
-    return action
+    # Dry-run reports the classified action (what we would do). Enforce returns
+    # the action after guardrails, which may be ESCALATE.
+    return record.classification if record.dry_run else record.action
 
 
 def _as_list(value: object) -> list[Any]:
@@ -192,7 +225,11 @@ def _register_kopf() -> None:
     except ImportError:
         return
 
-    state = {"debouncer": Debouncer(), "client": NullClusterClient()}
+    state: dict[str, object] = {
+        "debouncer": Debouncer(),
+        "client": NullClusterClient(),
+        "breaker": CircuitBreaker(),
+    }
 
     @kopf.on.event("", "v1", "pods")
     def on_pod_event(body: Mapping[str, Any], **_: object) -> None:
@@ -201,13 +238,16 @@ def _register_kopf() -> None:
             return
         client = state["client"]
         debouncer = state["debouncer"]
+        breaker = state["breaker"]
         assert isinstance(client, NullClusterClient)
         assert isinstance(debouncer, Debouncer)
+        assert isinstance(breaker, CircuitBreaker)
         handle_failure(
             body,
             reason=reason,
             client=client,
             debouncer=debouncer,
+            breaker=breaker,
         )
 
 
