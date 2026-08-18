@@ -27,6 +27,32 @@ def _resources(yaml_text: str) -> list[Resource]:
     return result.resources
 
 
+def test_extract_selects_uses_pod_template_labels_not_match_labels() -> None:
+    """A Service selects pods, not Deployment.spec.selector.matchLabels."""
+    resources = _resources(
+        """
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: checkout, namespace: demo}
+spec:
+  selector: {matchLabels: {app: checkout-v2}}
+  template:
+    metadata: {labels: {app: checkout}}
+    spec:
+      containers: [{name: app, image: nginx:1.25}]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: checkout, namespace: demo}
+spec:
+  selector: {app: checkout}
+"""
+    )
+    edges = extract_selects(resources)
+    workload_edges = [edge for edge in edges if edge.target.endswith("/Deployment/checkout")]
+    assert len(workload_edges) == 1
+
+
 def test_extract_selects_service_to_matching_deployment() -> None:
     resources = _resources(
         """
