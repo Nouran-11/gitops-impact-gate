@@ -1,0 +1,2 @@
+# Placeholder: this scenario starts healthy, then crashes from an application bug.
+# The controller must escalate rather than remediate.

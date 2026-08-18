@@ -1,0 +1,11 @@
+--- demo/manifests/selector-break/deployment.yaml
++++ demo/manifests/selector-break/deployment.yaml
+@@ -11,7 +11,7 @@ spec:
+   template:
+     metadata:
+       labels:
+-        app: checkout
++        app: checkout-v2
+     spec:
+       containers:
+         - name: checkout
