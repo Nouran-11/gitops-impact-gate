@@ -10,9 +10,10 @@ from pydantic import BaseModel, Field
 
 from impactgate.analysis.rules import run_integrity_checks
 from impactgate.analysis.severity import severity_floor
+from impactgate.cache.fingerprint import FingerprintError, fingerprint_graph
 from impactgate.graph.diff import changed_nodes
 from impactgate.graph.edges import is_virtual_key
-from impactgate.models import Finding, GateDecision, Resource, Severity, Verdict
+from impactgate.models import Finding, GateDecision, Resource, Severity, Verdict, compute_finding_id
 
 REVERSE_DEPTH = 5
 NO_PODS = "(no pods)"
@@ -23,6 +24,7 @@ class ImpactResult(BaseModel):
     changed_nodes: list[str]
     needs_human_review: bool = False
     parse_errors: list[str] = Field(default_factory=list)
+    uncacheable: bool = False
 
 
 def compute_impact(
@@ -33,7 +35,13 @@ def compute_impact(
     changed = sorted(changed_nodes(before, after, changed_files))
     raw = run_integrity_checks(after, before=before)
     findings = [enrich_finding(after, item) for item in raw]
-    return ImpactResult(findings=findings, changed_nodes=changed)
+    uncacheable = False
+    try:
+        fingerprints = fingerprint_graph(after)
+        findings = [apply_node_fingerprint(item, fingerprints) for item in findings]
+    except FingerprintError:
+        uncacheable = True
+    return ImpactResult(findings=findings, changed_nodes=changed, uncacheable=uncacheable)
 
 
 def enrich_finding(graph: nx.DiGraph[str], finding: Finding) -> Finding:
@@ -49,6 +57,14 @@ def enrich_finding(graph: nx.DiGraph[str], finding: Finding) -> Finding:
         dangling_kind=dangling_kind,
     )
     return finding.model_copy(update={"path": path, "severity_floor": floor})
+
+
+def apply_node_fingerprint(finding: Finding, fingerprints: dict[str, str]) -> Finding:
+    digest = fingerprints.get(finding.resource.key(), "")
+    finding_id = compute_finding_id(
+        finding.rule, finding.resource.key(), finding.evidence, digest
+    )
+    return finding.model_copy(update={"id": finding_id})
 
 
 def reverse_paths(

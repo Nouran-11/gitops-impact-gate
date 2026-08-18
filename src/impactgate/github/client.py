@@ -8,6 +8,7 @@ import subprocess
 from pathlib import Path
 from typing import Any, Protocol
 
+from impactgate.cache.store import CacheStore
 from impactgate.config import load_settings
 from impactgate.models import GateDecision
 from impactgate.report.markdown import COMMENT_MARKER, status_for_risk
@@ -122,4 +123,8 @@ async def analyze_pull_request(payload: dict[str, Any]) -> GateDecision:
     after_dir = root / "head" / head_sha
     checkout_sha(clone_url, base_sha, before_dir, token=token)
     checkout_sha(clone_url, head_sha, after_dir, token=token)
-    return await run_analysis(after_dir, before_dir, settings.llm_provider)
+    cache_root = Path(settings.cache_dir)
+    if not cache_root.is_absolute():
+        cache_root = after_dir / cache_root
+    cache = CacheStore(cache_root, enabled=not settings.no_cache)
+    return await run_analysis(after_dir, before_dir, settings.llm_provider, cache=cache)

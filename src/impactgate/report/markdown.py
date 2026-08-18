@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
+from impactgate.cache.store import CacheStats
 from impactgate.models import GateDecision, Severity
 from impactgate.report.mermaid import from_paths
 
@@ -27,6 +28,7 @@ def render_report(
     decision: GateDecision,
     *,
     paths: Sequence[Sequence[str]] | None = None,
+    cache_stats: CacheStats | None = None,
 ) -> str:
     """Render a GateDecision as a Markdown PR comment."""
     lines = [
@@ -43,6 +45,8 @@ def render_report(
     if not decision.verdicts:
         lines.append("No findings.")
         lines.append("")
+        if cache_stats is not None:
+            lines.append(cache_stats.render())
         return "\n".join(lines)
 
     ordered = sorted(decision.verdicts, key=lambda v: _SEVERITY_ORDER[v.severity])
@@ -58,6 +62,8 @@ def render_report(
             lines.append(verdict.suggested_fix)
             lines.append("```")
             lines.append("")
+    if cache_stats is not None:
+        lines.append(cache_stats.render())
     return "\n".join(lines)
 
 
