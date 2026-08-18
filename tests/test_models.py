@@ -95,6 +95,8 @@ def test_cli_analyze_prints_empty_report(tmp_path: Path) -> None:
     assert "**Risk:** low" in result.output
     assert "No findings." in result.output
     assert "no findings" in result.output
+    assert "## Impact graph" not in result.output
+    assert "no impact" not in result.output
 
 
 def test_cli_help_lists_analyze() -> None:
@@ -127,3 +129,45 @@ def test_render_report_includes_verdicts() -> None:
     assert "Selector matches no pods." in rendered
     assert "```suggestion" in rendered
     assert "## Relationship findings" in rendered
+
+
+def test_render_report_omits_scanner_and_low_confidence_suggestions() -> None:
+    decision = GateDecision(
+        risk="high",
+        reason="mixed findings",
+        verdicts=[
+            Verdict(
+                finding_id="graph-low",
+                severity=Severity.HIGH,
+                explanation="Selector matches no pods.",
+                suggested_fix="spec:\n  selector:\n    app: checkout",
+                confidence=0.4,
+                origin="graph",
+                rule="broken-selector",
+                path=["demo/Ingress/public", "demo/Service/checkout"],
+            ),
+            Verdict(
+                finding_id="scan",
+                severity=Severity.HIGH,
+                explanation="Containers should not run as root.",
+                suggested_fix="seccompProfile:\n  type: Unconfined",
+                confidence=0.99,
+                origin="scanner",
+                rule="CKV_K8S_20",
+                path=["demo/Deployment/checkout"],
+            ),
+        ],
+    )
+    rendered = render_report(decision)
+    assert "```suggestion" not in rendered
+    assert "Unconfined" not in rendered
+    assert "## Scanner findings" in rendered
+    assert "CKV_K8S_20" in rendered
+
+
+def test_render_report_omits_empty_impact_graph() -> None:
+    decision = GateDecision(risk="low", verdicts=[], reason="no findings")
+    rendered = render_report(decision)
+    assert "## Impact graph" not in rendered
+    assert "no impact" not in rendered
+    assert "```mermaid" not in rendered

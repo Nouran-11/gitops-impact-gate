@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from impactgate.models import Finding, ResourceRef, Severity, compute_finding_id
-from impactgate.scanners.base import run_command
+from impactgate.scanners.base import run_command, with_guidance
 
 LOGGER = logging.getLogger("impactgate.scanners.checkov")
 
@@ -59,6 +59,9 @@ def _finding_from_check(check: dict[str, Any], source: Path) -> Finding | None:
         return None
     name = check.get("check_name")
     evidence = name if isinstance(name, str) else rule
+    guideline = check.get("guideline")
+    if isinstance(guideline, str) and guideline.strip():
+        evidence = with_guidance(evidence, f"Guideline: {guideline.strip()}")
     resource_id = check.get("resource")
     ref = _ref_from_checkov_resource(resource_id if isinstance(resource_id, str) else None, source)
     return Finding(

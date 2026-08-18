@@ -14,6 +14,21 @@ LOGGER = logging.getLogger("impactgate.scanners")
 SCANNER_TIMEOUT_SECONDS = 30
 
 
+def with_guidance(evidence: str, *parts: object) -> str:
+    """Append scanner-provided remediation text to evidence. Skip blanks and duplicates."""
+    extras: list[str] = []
+    for part in parts:
+        if not isinstance(part, str):
+            continue
+        text = part.strip()
+        if not text or text in evidence or text in extras:
+            continue
+        extras.append(text)
+    if not extras:
+        return evidence
+    return f"{evidence}. {' '.join(extras)}"
+
+
 class Scanner(Protocol):
     name: str
 

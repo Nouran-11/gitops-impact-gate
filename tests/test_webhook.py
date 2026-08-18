@@ -109,6 +109,12 @@ def test_mermaid_omits_scanner_pseudo_nodes() -> None:
     assert "-->" in source
 
 
+def test_mermaid_empty_paths_returns_blank() -> None:
+    assert from_paths([]) == ""
+    assert from_paths([["demo/File/checkout"], ["(no pods)"]]) == ""
+    assert "no impact" not in from_paths([])
+
+
 def test_render_report_includes_marker_and_mermaid() -> None:
     decision = GateDecision(risk="low", verdicts=[], reason="no findings")
     rendered = render_report(

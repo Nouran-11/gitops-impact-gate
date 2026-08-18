@@ -23,7 +23,13 @@ Return ONLY JSON: an object with key "verdicts" whose value is an array of objec
   ]
 }}
 
-If you are not confident in a patch, set suggested_fix to null rather than guessing.
+suggested_fix rules (a wrong patch is worse than no patch):
+- Graph findings only. For scanner findings, always null — scanners ship their own remediation.
+- Return a unified diff only when you are highly confident it is correct.
+- Never weaken security: no seccompProfile: unconfined, no allowPrivilegeEscalation: true,
+  no privileged ports (0-1023) described as non-privileged, no runAsUser: 0.
+- If unsure, set suggested_fix to null rather than guessing.
+
 You may raise severity above the floor. You may not lower it; the caller enforces that.
 
 Findings:

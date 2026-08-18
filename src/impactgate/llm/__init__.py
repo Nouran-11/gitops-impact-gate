@@ -7,7 +7,7 @@ import logging
 import re
 from collections.abc import Sequence
 
-from impactgate.analysis.severity import raise_only
+from impactgate.analysis.severity import accepted_suggested_fix, raise_only
 from impactgate.cache.store import CacheStore
 from impactgate.llm.prompts import STRICT_RETRY, render_prompt
 from impactgate.llm.provider import (
@@ -143,12 +143,17 @@ def _match_verdicts(findings: Sequence[Finding], parsed: Sequence[ModelVerdict])
         if match is None:
             result.append(_degraded(finding))
             continue
+        explanation = match.explanation
+        if finding.origin == "scanner" and finding.evidence and finding.evidence not in explanation:
+            explanation = f"{explanation}\n\n{finding.evidence}"
         result.append(
             _verdict(
                 finding,
                 severity=raise_only(finding.severity_floor, match.severity),
-                explanation=match.explanation,
-                suggested_fix=match.suggested_fix,
+                explanation=explanation,
+                suggested_fix=accepted_suggested_fix(
+                    finding.origin, match.suggested_fix, match.confidence
+                ),
                 confidence=match.confidence,
             )
         )
@@ -204,7 +209,14 @@ def _verdict(
 
 def _with_finding_meta(verdict: Verdict, finding: Finding) -> Verdict:
     return verdict.model_copy(
-        update={"origin": finding.origin, "path": list(finding.path), "rule": finding.rule}
+        update={
+            "origin": finding.origin,
+            "path": list(finding.path),
+            "rule": finding.rule,
+            "suggested_fix": accepted_suggested_fix(
+                finding.origin, verdict.suggested_fix, verdict.confidence
+            ),
+        }
     )
 
 

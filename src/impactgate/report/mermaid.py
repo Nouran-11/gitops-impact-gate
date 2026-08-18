@@ -29,7 +29,7 @@ def from_paths(paths: Sequence[Sequence[str]]) -> str:
                 lines.append(f"  {left} --> {right}")
                 seen_edges.add(edge)
     if len(lines) == 1:
-        lines.append('  empty["no impact"]')
+        return ""
     return "\n".join(lines)
 
 

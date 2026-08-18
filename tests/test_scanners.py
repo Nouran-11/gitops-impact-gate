@@ -23,6 +23,7 @@ def test_parse_checkov_failed_checks(tmp_path: Path) -> None:
                     "check_name": "Containers should not run as root",
                     "resource": "Deployment.demo.checkout",
                     "severity": "HIGH",
+                    "guideline": "https://docs.bridgecrew.io/docs/bc_k8s_20",
                 }
             ]
         }
@@ -33,6 +34,7 @@ def test_parse_checkov_failed_checks(tmp_path: Path) -> None:
     assert findings[0].rule == "CKV_K8S_20"
     assert findings[0].resource.key() == "demo/Deployment/checkout"
     assert findings[0].severity_floor == Severity.HIGH
+    assert "Guideline: https://docs.bridgecrew.io/docs/bc_k8s_20" in findings[0].evidence
 
 
 def test_parse_trivy_misconfigurations(tmp_path: Path) -> None:
@@ -45,6 +47,7 @@ def test_parse_trivy_misconfigurations(tmp_path: Path) -> None:
                         "ID": "KSV001",
                         "Title": "Process can elevate its own privileges",
                         "Severity": "MEDIUM",
+                        "Resolution": "Set 'allowPrivilegeEscalation' to false.",
                     }
                 ],
             }
@@ -53,6 +56,7 @@ def test_parse_trivy_misconfigurations(tmp_path: Path) -> None:
     findings = parse_trivy_json(json.dumps(payload), tmp_path / "deployment.yaml")
     assert findings[0].rule == "KSV001"
     assert findings[0].origin == "scanner"
+    assert "Remediation: Set 'allowPrivilegeEscalation' to false." in findings[0].evidence
 
 
 def test_parse_kubelinter_reports(tmp_path: Path) -> None:
@@ -61,6 +65,7 @@ def test_parse_kubelinter_reports(tmp_path: Path) -> None:
             {
                 "Check": "unset-cpu-requirements",
                 "Diagnostic": {"Message": "container is missing cpu requests"},
+                "Remediation": "Set cpu requests on the container.",
                 "Object": {
                     "K8sObject": {
                         "Kind": "Deployment",
@@ -75,6 +80,7 @@ def test_parse_kubelinter_reports(tmp_path: Path) -> None:
     assert findings[0].rule == "unset-cpu-requirements"
     assert findings[0].resource.key() == "demo/Deployment/checkout"
     assert findings[0].severity_floor == Severity.LOW
+    assert "Remediation: Set cpu requests on the container." in findings[0].evidence
 
 
 def test_deduplicate_same_rule_and_resource() -> None:

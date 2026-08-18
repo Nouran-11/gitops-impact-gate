@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
+from impactgate.analysis.severity import accepted_suggested_fix
 from impactgate.cache.store import CacheStats
 from impactgate.models import GateDecision, Severity, Verdict
 from impactgate.report.mermaid import from_paths
@@ -42,11 +43,15 @@ def render_report(
     ]
     graph_verdicts = [item for item in decision.verdicts if item.origin == "graph"]
     scanner_verdicts = [item for item in decision.verdicts if item.origin == "scanner"]
-    diagram_paths = paths or [item.path for item in graph_verdicts if item.path]
+    if paths is not None:
+        diagram_paths = [list(path) for path in paths]
+    else:
+        diagram_paths = [item.path for item in graph_verdicts if item.path]
     if not diagram_paths:
-        diagram_paths = _paths_from_verdicts(decision)
+        diagram_paths = _paths_from_verdicts(graph_verdicts)
     diagram = from_paths(diagram_paths)
-    lines.extend(["## Impact graph", "", "```mermaid", diagram, "```", ""])
+    if diagram:
+        lines.extend(["## Impact graph", "", "```mermaid", diagram, "```", ""])
     if not decision.verdicts:
         lines.append("No findings.")
         lines.append("")
@@ -75,16 +80,17 @@ def _append_verdicts(lines: list[str], verdicts: Sequence[Verdict]) -> None:
         lines.append("")
         lines.append(verdict.explanation)
         lines.append("")
-        if verdict.suggested_fix:
+        patch = accepted_suggested_fix(verdict.origin, verdict.suggested_fix, verdict.confidence)
+        if patch is not None:
             lines.append("```suggestion")
-            lines.append(verdict.suggested_fix)
+            lines.append(patch)
             lines.append("```")
             lines.append("")
 
 
-def _paths_from_verdicts(decision: GateDecision) -> list[list[str]]:
+def _paths_from_verdicts(verdicts: Sequence[Verdict]) -> list[list[str]]:
     paths: list[list[str]] = []
-    for verdict in decision.verdicts:
+    for verdict in verdicts:
         if verdict.path:
             paths.append(list(verdict.path))
             continue

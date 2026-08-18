@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from impactgate.models import Finding, ResourceRef, Severity, compute_finding_id
-from impactgate.scanners.base import run_command
+from impactgate.scanners.base import run_command, with_guidance
 
 LOGGER = logging.getLogger("impactgate.scanners.kubelinter")
 
@@ -59,6 +59,9 @@ def _finding_from_report(report: dict[str, Any], source: Path) -> Finding | None
     elif isinstance(report.get("Message"), str):
         message = report["Message"]
     evidence = message or rule
+    remediation = report.get("Remediation")
+    if isinstance(remediation, str) and remediation.strip():
+        evidence = with_guidance(evidence, f"Remediation: {remediation.strip()}")
     floor = Severity.LOW if _is_style_check(rule) else Severity.MEDIUM
     ref = _ref_from_object(report.get("Object"), source)
     return Finding(
