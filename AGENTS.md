@@ -510,3 +510,17 @@ Do not build these, even if they seem useful:
 - Any form of authentication beyond the GitHub webhook signature
 - Automatic merging of PRs — the tool sets a status, humans merge
 - Storing anything in a database
+
+---
+
+## Cursor Cloud specific instructions
+
+Environment facts for future cloud agents (the update script has already installed dependencies before you start):
+
+- **Language/runtime:** Python 3.12 only (Ubuntu 24.04 ships `python3.12`). Node 22 is also present but unused by this project.
+- **Dependency install:** the package is installed editable with dev extras into the **system** Python via `pip install --break-system-packages -e ".[dev]"`. There is intentionally no `.venv` — Ubuntu 24.04 marks the interpreter externally-managed (PEP 668), and using the system interpreter keeps `python3`/`pytest`/`mypy`/`ruff` working without activating anything.
+- **Console scripts on PATH:** `pip` installs the `impactgate` entrypoint (and `pytest`/`mypy`/`ruff` scripts) into `~/.local/bin`, which is **not** on PATH by default. Either call the `impactgate` console script by full path (`~/.local/bin/impactgate ...`) or run modules directly: `python3 -m pytest`, `python3 -m mypy`, `python3 -m ruff check .`.
+- **Running the CLI:** use the `impactgate` console script (e.g. `~/.local/bin/impactgate analyze demo/manifests/selector-break`). Do **not** run `python3 -m impactgate.cli` — `cli.py` has no `__main__` guard, so that form exits silently without running Typer.
+- **Standard checks** (from section 12, run before declaring a milestone done): `python3 -m pytest`, `python3 -m ruff check .`, `python3 -m mypy`. Config for all three lives in `pyproject.toml` (mypy is `strict`; it reads `packages`/`mypy_path` from there, so run it with no arguments).
+- **Current milestone:** the repo is at M0. `impactgate analyze <dir>` deliberately prints an empty "no findings" report — that is correct behavior, not a bug.
+- **Not yet required:** external scanner binaries (checkov/trivy/kube-linter), a `kind` cluster, and LLM provider keys are only needed for later milestones (M3+). They are not installed and not needed to run the current CLI or the test suite (tests use fakes, never a real provider).
