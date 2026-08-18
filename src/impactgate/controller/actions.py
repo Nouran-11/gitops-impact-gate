@@ -12,6 +12,8 @@ from typing import Any, Protocol
 
 from pydantic import BaseModel, Field
 
+from impactgate.metrics import REGISTRY
+
 LOGGER = logging.getLogger("impactgate.controller")
 HEALTHY_FOR = timedelta(minutes=10)
 
@@ -234,6 +236,9 @@ def execute_action(
         diagnosis.workload,
         f"impactgate {record.action}: {record.outcome}",
     )
+    reported = classified if dry_run else guarded
+    label = "dry-run" if dry_run else ("escalated" if guarded == Action.ESCALATE else "executed")
+    REGISTRY.record_remediation(reported.value, label)
     return record
 
 
