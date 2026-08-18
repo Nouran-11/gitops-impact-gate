@@ -1,0 +1,12 @@
+apiVersion: impactgate.io/v1
+kind: RemediationPolicy
+metadata:
+  name: default
+  namespace: demo
+spec:
+  mode: dry-run
+  minConfidence: 0.8
+  allowedActions: [rollback, restart]
+  maxActionsPerHour: 2
+  memoryBumpFactor: 1.5
+  memoryLimitCeiling: "2Gi"

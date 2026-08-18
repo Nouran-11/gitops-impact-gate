@@ -89,6 +89,24 @@ def test_metrics_endpoint_does_not_require_hmac() -> None:
     assert response.headers["content-type"].startswith("text/plain")
 
 
+def test_controller_metrics_http_server_exposes_registry() -> None:
+    import urllib.request
+
+    from impactgate.metrics import start_http_server, stop_http_server
+
+    REGISTRY.record_remediation("rollback", "executed")
+    port = start_http_server(0, addr="127.0.0.1")
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/metrics", timeout=2) as response:
+            body = response.read().decode("utf-8")
+            status = response.status
+        assert status == 200
+        assert "impactgate_remediation_total" in body
+        assert 'action="rollback"' in body
+    finally:
+        stop_http_server()
+
+
 def test_grafana_dashboard_has_mttr_panel() -> None:
     path = Path(__file__).resolve().parents[1] / "deploy" / "grafana-dashboard.json"
     dashboard = json.loads(path.read_text(encoding="utf-8"))

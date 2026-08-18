@@ -3,8 +3,6 @@ kind: Deployment
 metadata:
   name: payments
   namespace: demo
-  labels:
-    impactgate.io/managed: "true"
 spec:
   replicas: 1
   selector:

@@ -6,6 +6,30 @@ Relationship-aware review of Kubernetes infrastructure-as-code pull requests.
 pip install -e ".[dev]"
 impactgate analyze demo/manifests/selector-break
 ```
+
+## Controller (kind)
+
+The label gate reads **pod** labels, not Deployment labels. Set
+`impactgate.io/managed: "true"` on `spec.template.metadata.labels` so
+ReplicaSet-created pods inherit it. A label on the Deployment's
+`metadata.labels` is ignored.
+
+`deploy/crd.yaml` is the CRD only. `deploy/policy.yaml` is the `RemediationPolicy`
+instance for namespace `demo`. Apply them in that order — a combined file is
+rejected on a fresh cluster because the instance is validated before the CRD
+exists.
+
+```bash
+kubectl apply -f deploy/crd.yaml
+kubectl create namespace demo
+kubectl apply -f deploy/policy.yaml
+# optional: kubectl -n demo patch remediationpolicy/default --type merge \
+#   -p '{"spec":{"mode":"enforce"}}'
+
+IMPACTGATE_CONTROLLER_ENABLED=true impactgate controller
+# override the scrape port with --metrics-port or IMPACTGATE_METRICS_PORT
+curl localhost:8000/metrics
+```
 For engineers who change Kubernetes manifests in Git: compute what a pull request breaks in the resource graph, then gate merge and (later) remediate failed workloads.
 
 This repo is a locked build spec (`AGENTS.md`). There is no `src/`, `pyproject.toml`, CLI, or tests in the tree. Do not treat the layout below as files that exist.
@@ -71,13 +95,14 @@ Starts only if `IMPACTGATE_CONTROLLER_ENABLED=true`. Not in pre-final (M0–M5).
 | Screen | Purpose |
 |---|---|
 | Pod / Event watches | CrashLoopBackOff, ImagePullBackOff, CreateContainerConfigError, OOMKilled, FailedScheduling, Unhealthy, BackOff |
-| `RemediationPolicy` CRD | Per-namespace mode and allowed `Action` values |
+| `RemediationPolicy` CRD | Per-namespace mode and allowed `Action` values. Watched by the controller; missing policy → dry-run with no allowed actions. |
+| Label gate | `impactgate.io/managed: "true"` on **pods** (`spec.template.metadata.labels`), not on the Deployment object |
 
 ### Metrics
 
 | Screen | Purpose |
 |---|---|
-| `/metrics` | Prometheus text (M9) |
+| `/metrics` | Prometheus text. Webhook app exposes it; `impactgate controller` serves it on `--metrics-port` (default 8000). |
 
 ### URL namespaces
 

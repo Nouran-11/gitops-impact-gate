@@ -36,6 +36,7 @@ REQUIRED_PATHS = [
     "demo/manifests/selector-break/deployment.yaml",
     "demo/kind-config.yaml",
     "deploy/crd.yaml",
+    "deploy/policy.yaml",
     "deploy/grafana-dashboard.json",
     "src/impactgate/metrics.py",
     "pyproject.toml",

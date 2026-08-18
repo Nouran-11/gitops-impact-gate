@@ -22,8 +22,8 @@ from impactgate.controller.actions import (
     classify_failure,
     execute_action,
 )
-from impactgate.controller.policy import RemediationPolicy, default_policy
-from impactgate.metrics import REGISTRY
+from impactgate.controller.policy import RemediationPolicy, default_policy, policy_from_crd
+from impactgate.metrics import REGISTRY, start_http_server
 
 LOGGER = logging.getLogger("impactgate.controller")
 MANAGED_LABEL = "impactgate.io/managed"
@@ -54,6 +54,86 @@ class Debouncer:
         return len(recent) >= self.threshold
 
 
+class PolicyCache:
+    """Namespaced RemediationPolicy objects as seen on the cluster."""
+
+    def __init__(self) -> None:
+        self._policies: dict[tuple[str, str], RemediationPolicy] = {}
+        self._missing_warned: set[str] = set()
+
+    def upsert(self, namespace: str, name: str, spec: Mapping[str, object]) -> RemediationPolicy:
+        policy = policy_from_crd(dict(spec))
+        self._policies[(namespace, name)] = policy
+        self._missing_warned.discard(namespace)
+        return policy
+
+    def delete(self, namespace: str, name: str) -> None:
+        self._policies.pop((namespace, name), None)
+
+    def for_namespace(self, namespace: str) -> RemediationPolicy:
+        named = self._policies.get((namespace, "default"))
+        if named is not None:
+            return named
+        matches = [policy for (ns, _name), policy in self._policies.items() if ns == namespace]
+        if len(matches) == 1:
+            return matches[0]
+        if namespace not in self._missing_warned:
+            self._missing_warned.add(namespace)
+            LOGGER.warning(
+                "no RemediationPolicy in namespace %s; using dry-run with no allowed actions",
+                namespace,
+            )
+        return default_policy()
+
+
+@dataclass
+class ControllerRuntime:
+    """In-process stand-in for the kopf watchers. Tests feed cluster objects here."""
+
+    debouncer: Debouncer = field(default_factory=Debouncer)
+    client: ClusterClient = field(default_factory=lambda: NullClusterClient())
+    breaker: CircuitBreaker = field(default_factory=CircuitBreaker)
+    policies: PolicyCache = field(default_factory=PolicyCache)
+    logger: logging.Logger = LOGGER
+
+    def ingest_policy(self, body: Mapping[str, Any], *, deleted: bool = False) -> None:
+        metadata = body.get("metadata") or {}
+        namespace = str(metadata.get("namespace") or "default")
+        name = str(metadata.get("name") or "default")
+        if deleted:
+            self.policies.delete(namespace, name)
+            self.logger.info("dropped RemediationPolicy %s/%s", namespace, name)
+            return
+        spec_obj = body.get("spec") or {}
+        spec = spec_obj if isinstance(spec_obj, dict) else {}
+        policy = self.policies.upsert(namespace, name, spec)
+        self.logger.info(
+            "loaded RemediationPolicy %s/%s mode=%s allowed=%s",
+            namespace,
+            name,
+            policy.mode,
+            [item.value for item in policy.allowed_actions],
+        )
+
+    def ingest_pod(self, body: Mapping[str, Any], *, now: datetime | None = None) -> Action | None:
+        reason = extract_waiting_reason(body)
+        if reason is None:
+            maybe_record_recovery(body, client=self.client, now=now)
+            return None
+        metadata = body.get("metadata") or {}
+        namespace = str(metadata.get("namespace") or "default")
+        return handle_failure(
+            body,
+            reason=reason,
+            client=self.client,
+            debouncer=self.debouncer,
+            policy=self.policies.for_namespace(namespace),
+            breaker=self.breaker,
+            logger=self.logger,
+            now=now,
+        )
+
+
 class NullClusterClient:
     def previous_logs(self, namespace: str, pod: str) -> str:
         del namespace, pod
@@ -69,7 +149,7 @@ class NullClusterClient:
 
     def owning_workload(self, namespace: str, pod: Mapping[str, Any]) -> str:
         del namespace
-        return owning_workload_name(pod)
+        return workload_from_pod(pod)
 
     def replicaset_history(self, namespace: str, workload: str) -> list[str]:
         del namespace, workload
@@ -114,23 +194,6 @@ class KubernetesClusterClient(NullClusterClient):
 
     def current_logs(self, namespace: str, pod: str) -> str:
         return read_pod_logs(namespace, pod, previous=False)
-
-
-def owning_workload_name(pod: Mapping[str, Any]) -> str:
-    """Deployment name from a ReplicaSet-owned pod, else the pod name."""
-    meta_obj = pod.get("metadata")
-    meta = meta_obj if isinstance(meta_obj, dict) else {}
-    labels_obj = meta.get("labels")
-    labels = labels_obj if isinstance(labels_obj, dict) else {}
-    for owner in _as_list(meta.get("ownerReferences")):
-        if not isinstance(owner, dict) or owner.get("kind") != "ReplicaSet":
-            continue
-        rs_name = str(owner.get("name") or "")
-        pod_hash = str(labels.get("pod-template-hash") or "")
-        if pod_hash and rs_name.endswith(f"-{pod_hash}"):
-            return rs_name[: -(len(pod_hash) + 1)]
-        return rs_name or str(meta.get("name") or "unknown")
-    return str(meta.get("name") or "unknown")
 
 
 def extract_runtime_evidence(pod: Mapping[str, Any]) -> str:
@@ -259,6 +322,25 @@ def _logs_via_kubectl(namespace: str, name: str, *, previous: bool) -> str:
     return ""
 
 
+def workload_from_pod(pod: Mapping[str, Any]) -> str:
+    """Deployment/StatefulSet/DaemonSet name, walking ReplicaSet ownerReferences."""
+    metadata = pod.get("metadata") or {}
+    owners = metadata.get("ownerReferences") or []
+    if isinstance(owners, list):
+        for owner in owners:
+            if not isinstance(owner, dict):
+                continue
+            kind = owner.get("kind")
+            name = owner.get("name")
+            if not isinstance(name, str) or not name:
+                continue
+            if kind in {"Deployment", "StatefulSet", "DaemonSet"}:
+                return name
+            if kind == "ReplicaSet":
+                return name.rsplit("-", 1)[0] if "-" in name else name
+    return str(metadata.get("name") or "unknown")
+
+
 def compress_logs(raw: str, *, max_chars: int = 4000) -> str:
     """Collapse consecutive duplicate lines and cap length. Shared with CI diagnosis."""
     if not raw:
@@ -312,6 +394,11 @@ def extract_waiting_reason(pod: Mapping[str, Any]) -> str | None:
 
 
 def is_managed(pod: Mapping[str, Any]) -> bool:
+    """True only when the *pod* carries impactgate.io/managed=true.
+
+    Kubernetes copies labels from spec.template.metadata.labels, not from the
+    owning Deployment's metadata.labels.
+    """
     labels = (pod.get("metadata") or {}).get("labels") or {}
     return str(labels.get(MANAGED_LABEL, "")).lower() == "true"
 
@@ -423,37 +510,66 @@ def _as_list(value: object) -> list[Any]:
     return value if isinstance(value, list) else []
 
 
+RUNTIME = ControllerRuntime(client=KubernetesClusterClient())
+
+
+def reset_runtime(
+    *,
+    client: ClusterClient | None = None,
+    debouncer: Debouncer | None = None,
+    breaker: CircuitBreaker | None = None,
+) -> ControllerRuntime:
+    """Replace the process-wide runtime. Used by tests between scenarios."""
+    global RUNTIME
+    RUNTIME = ControllerRuntime(
+        debouncer=debouncer if debouncer is not None else Debouncer(),
+        client=client if client is not None else NullClusterClient(),
+        breaker=breaker if breaker is not None else CircuitBreaker(),
+        policies=PolicyCache(),
+    )
+    return RUNTIME
+
+
+def handle_policy_event(
+    body: Mapping[str, Any],
+    type: str | None = None,
+    **_: object,
+) -> None:
+    """kopf: watch RemediationPolicy and cache the spec for the pod's namespace."""
+    RUNTIME.ingest_policy(body, deleted=type == "DELETED")
+
+
+def handle_pod_event(body: Mapping[str, Any], **_: object) -> Action | None:
+    """kopf: watch Pods and remediate using the policy for that namespace."""
+    return RUNTIME.ingest_pod(body)
+
+
+def handle_startup(**_: object) -> int:
+    """Serve Prometheus text at /metrics for the controller process."""
+    from impactgate.config import load_settings
+
+    settings = load_settings()
+    port = start_http_server(settings.metrics_port)
+    LOGGER.info("serving /metrics on port %s", port)
+    return port
+
+
+_KOPF_REGISTERED = False
+
+
 def _register_kopf() -> None:
+    global _KOPF_REGISTERED
+    if _KOPF_REGISTERED:
+        return
     try:
         import kopf
     except ImportError:
         return
 
-    state: dict[str, object] = {
-        "debouncer": Debouncer(),
-        "client": KubernetesClusterClient(),
-        "breaker": CircuitBreaker(),
-    }
-
-    @kopf.on.event("", "v1", "pods")
-    def on_pod_event(body: Mapping[str, Any], **_: object) -> None:
-        client = state["client"]
-        debouncer = state["debouncer"]
-        breaker = state["breaker"]
-        assert isinstance(client, KubernetesClusterClient)
-        assert isinstance(debouncer, Debouncer)
-        assert isinstance(breaker, CircuitBreaker)
-        reason = extract_waiting_reason(body)
-        if reason is None:
-            maybe_record_recovery(body, client=client)
-            return
-        handle_failure(
-            body,
-            reason=reason,
-            client=client,
-            debouncer=debouncer,
-            breaker=breaker,
-        )
+    kopf.on.startup()(handle_startup)
+    kopf.on.event("impactgate.io", "v1", "remediationpolicies")(handle_policy_event)
+    kopf.on.event("", "v1", "pods")(handle_pod_event)
+    _KOPF_REGISTERED = True
 
 
 _register_kopf()

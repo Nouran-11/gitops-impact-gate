@@ -28,7 +28,7 @@ from impactgate.controller.watcher import (
     extract_waiting_reason,
     handle_failure,
     is_managed,
-    owning_workload_name,
+    workload_from_pod,
 )
 
 NOW = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
@@ -498,8 +498,8 @@ def test_crashloop_without_traceback_still_restarts() -> None:
     assert classify_failure(diagnosis) == Action.RESTART
 
 
-def test_owning_workload_name_strips_replicaset_hash() -> None:
-    assert owning_workload_name(_real_bug_live_pod()) == "payments"
+def test_workload_from_pod_strips_replicaset_hash() -> None:
+    assert workload_from_pod(_real_bug_live_pod()) == "payments"
 
 
 def test_extract_runtime_evidence_includes_command_args() -> None:
@@ -553,3 +553,6 @@ def test_kopf_testing_utilities_are_available() -> None:
     assert KopfRunner is not None
     assert kopf.get_default_registry() is not None
     assert watcher.handle_failure is not None
+    watching = {handler.fn for handler in kopf.get_default_registry()._watching.get_all_handlers()}
+    assert watcher.handle_policy_event in watching
+    assert watcher.handle_pod_event in watching
