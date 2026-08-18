@@ -8,6 +8,7 @@ import re
 from collections.abc import Sequence
 
 from impactgate.analysis.severity import raise_only
+from impactgate.cache.store import CacheStore
 from impactgate.llm.prompts import PROMPT_VERSION, STRICT_RETRY, render_prompt
 from impactgate.llm.provider import FakeProvider, Provider, ProviderError, build_provider
 from impactgate.llm.schema import ModelBatch, ModelVerdict
@@ -28,18 +29,34 @@ async def explain_findings(
     provider: Provider | None = None,
     diffs: str = "(none)",
     environment: str = "namespace unknown, exposure unknown",
+    cache: CacheStore | None = None,
 ) -> list[Verdict]:
     """Explain findings in batches. Never raises; degrades on provider/parse failure."""
     if not findings:
         return []
     active = provider if provider is not None else build_provider()
-    verdicts: list[Verdict] = []
-    grouped = _group(findings)
+    cached_verdicts: dict[str, Verdict] = {}
+    pending: list[Finding] = []
+    for finding in findings:
+        hit = cache.get_verdict(finding.id) if cache is not None else None
+        if hit is not None:
+            if cache is not None:
+                cache.stats.llm_calls_saved += 1
+            cached_verdicts[finding.id] = hit
+        else:
+            pending.append(finding)
+    fresh: list[Verdict] = []
+    grouped = _group(pending)
     for batch in grouped:
-        verdicts.extend(
+        if cache is not None:
+            cache.stats.llm_calls_made += 1
+        fresh.extend(
             await _explain_batch(batch, active, diffs=diffs, environment=environment)
         )
-    by_id = {item.finding_id: item for item in verdicts}
+    if cache is not None:
+        for verdict in fresh:
+            cache.put_verdict(verdict)
+    by_id = {**cached_verdicts, **{item.finding_id: item for item in fresh}}
     ordered: list[Verdict] = []
     for finding in findings:
         if finding.id in by_id:

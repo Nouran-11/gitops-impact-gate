@@ -9,11 +9,12 @@ import networkx as nx
 import typer
 
 from impactgate.analysis.impact import ImpactResult, compute_impact, to_gate_decision
+from impactgate.cache.store import CacheStats, CacheStore, parse_directory_cached
 from impactgate.config import load_settings
 from impactgate.graph.builder import build_graph
 from impactgate.graph.diff import changed_files_between
 from impactgate.graph.parser import ParseResult, parse_directory
-from impactgate.llm import build_provider, explain_findings
+from impactgate.llm import Provider, build_provider, explain_findings
 from impactgate.models import GateDecision, Verdict
 from impactgate.report.markdown import render_report
 from impactgate.scanners import run_all_scanners
@@ -57,16 +58,42 @@ def analyze(
 ) -> None:
     """Analyze a directory of Kubernetes manifests and print a report."""
     settings = load_settings(repo_root=path, no_cache=no_cache)
-    decision = asyncio.run(run_analysis(path, before, settings.llm_provider))
-    typer.echo(render_report(decision), nl=False)
+    cache_root = Path(settings.cache_dir)
+    if not cache_root.is_absolute():
+        cache_root = path / cache_root
+    cache = CacheStore(cache_root, enabled=not settings.no_cache)
+    decision = asyncio.run(run_analysis(path, before, settings.llm_provider, cache=cache))
+    typer.echo(render_report(decision, cache_stats=cache.stats), nl=False)
 
 
-async def run_analysis(after_dir: Path, before_dir: Path | None, llm_provider: str) -> GateDecision:
-    after_parsed = parse_directory(after_dir)
+async def run_analysis(
+    after_dir: Path,
+    before_dir: Path | None,
+    llm_provider: str,
+    *,
+    cache: CacheStore | None = None,
+    provider: Provider | None = None,
+) -> GateDecision:
+    if cache is not None:
+        cache.stats = CacheStats()
+    if cache is not None:
+        after_parsed = parse_directory_cached(after_dir, cache)
+    else:
+        after_parsed = parse_directory(after_dir)
     if not after_parsed.ok:
+        if cache is not None:
+            cache.stats.uncacheable = True
         return _human_review(after_parsed)
-    before_parsed = parse_directory(before_dir) if before_dir is not None else ParseResult()
+    if before_dir is not None:
+        if cache is not None:
+            before_parsed = parse_directory_cached(before_dir, cache)
+        else:
+            before_parsed = parse_directory(before_dir)
+    else:
+        before_parsed = ParseResult()
     if before_dir is not None and not before_parsed.ok:
+        if cache is not None:
+            cache.stats.uncacheable = True
         return _human_review(before_parsed)
     after_graph = build_graph(after_parsed.resources)
     before_graph: nx.DiGraph[str] = (
@@ -74,12 +101,15 @@ async def run_analysis(after_dir: Path, before_dir: Path | None, llm_provider: s
     )
     files = changed_files_between(before_dir, after_dir)
     result = compute_impact(before_graph, after_graph, files)
-    scanner_findings = await run_all_scanners(_scan_targets(after_dir, files))
+    if result.uncacheable and cache is not None:
+        cache.stats.uncacheable = True
+    scanner_findings = await run_all_scanners(_scan_targets(after_dir, files), cache=cache)
     merged = result.model_copy(update={"findings": [*result.findings, *scanner_findings]})
     decision = to_gate_decision(merged)
     if not merged.findings:
         return decision
-    verdicts = await explain_findings(merged.findings, provider=build_provider(llm_provider))
+    llm = provider if provider is not None else build_provider(llm_provider)
+    verdicts = await explain_findings(merged.findings, provider=llm, cache=cache)
     return _with_verdicts(decision, verdicts)
 
 
