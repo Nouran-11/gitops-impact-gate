@@ -9,11 +9,12 @@ from collections.abc import Sequence
 
 from impactgate.analysis.severity import raise_only
 from impactgate.cache.store import CacheStore
-from impactgate.llm.prompts import PROMPT_VERSION, STRICT_RETRY, render_prompt
+from impactgate.llm.prompts import STRICT_RETRY, render_prompt
 from impactgate.llm.provider import FakeProvider, Provider, ProviderError, build_provider
 from impactgate.llm.schema import ModelBatch, ModelVerdict
 from impactgate.metrics import REGISTRY
 from impactgate.models import Finding, Verdict
+from impactgate.prompting import PROMPT_VERSION
 
 LOGGER = logging.getLogger("impactgate.llm")
 BATCH_SIZE = 10

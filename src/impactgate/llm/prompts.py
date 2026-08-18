@@ -5,8 +5,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 from impactgate.models import Finding
-
-PROMPT_VERSION = "v1"
+from impactgate.prompting import PROMPT_VERSION
 
 PROMPT_TEMPLATE = """You explain Kubernetes graph/scanner findings that are already verified.
 Do not look for new problems. Do not invent issues. Ranking and a patch are your only jobs.
@@ -67,3 +66,6 @@ def render_prompt(
         diffs=diffs,
         environment=environment,
     )
+
+
+__all__ = ["PROMPT_TEMPLATE", "PROMPT_VERSION", "STRICT_RETRY", "render_prompt"]

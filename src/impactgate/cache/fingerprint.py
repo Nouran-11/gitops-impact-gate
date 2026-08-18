@@ -9,8 +9,8 @@ from typing import Any
 import networkx as nx
 
 from impactgate import __version__
-from impactgate.llm.prompts import PROMPT_VERSION
 from impactgate.models import Resource
+from impactgate.prompting import PROMPT_VERSION
 
 SCANNER_VERSIONS = ("checkov", "trivy", "kube-linter")
 
