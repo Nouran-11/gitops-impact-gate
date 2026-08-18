@@ -85,7 +85,7 @@ def test_cli_selector_break_after_dir(tmp_path: Path, monkeypatch: pytest.Monkey
         encoding="utf-8",
     )
 
-    async def no_scanners(_files: object) -> list[Finding]:
+    async def no_scanners(_files: object, **_kwargs: object) -> list[Finding]:
         return []
 
     monkeypatch.setattr("impactgate.cli.run_all_scanners", no_scanners)
@@ -112,7 +112,7 @@ def test_cli_merges_scanner_findings(tmp_path: Path, monkeypatch: pytest.MonkeyP
         severity_floor=Severity.HIGH,
     )
 
-    async def fake_scanners(_files: object) -> list[Finding]:
+    async def fake_scanners(_files: object, **_kwargs: object) -> list[Finding]:
         return [scanner_finding]
 
     monkeypatch.setattr("impactgate.cli.run_all_scanners", fake_scanners)
