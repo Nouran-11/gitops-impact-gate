@@ -14,6 +14,7 @@ from impactgate.controller.cluster import (
     RESTART_ANNOTATION,
     KubernetesClusterClient,
     NullClusterClient,
+    workload_from_pod,
 )
 from impactgate.controller.watcher import NullClusterClient as WatcherNull
 
@@ -320,6 +321,88 @@ def test_owning_workload_follows_replicaset_owner() -> None:
         }
     }
     assert client.owning_workload("demo", pod) == "storefront"
+
+
+def _kind_storefront_pod() -> dict[str, Any]:
+    """ReplicaSet-owned pod body as returned by the kind API / kopf watch.
+
+    Matches demo/storefront after `kubectl set image ... nginx:doesnotexist`:
+    Pod storefront-5f9b476644-xr5x5 owned by ReplicaSet storefront-5f9b476644
+    owned by Deployment storefront.
+    """
+    return {
+        "apiVersion": "v1",
+        "kind": "Pod",
+        "metadata": {
+            "name": "storefront-5f9b476644-xr5x5",
+            "namespace": "demo",
+            "uid": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            "labels": {
+                "app": "storefront",
+                "impactgate.io/managed": "true",
+                "pod-template-hash": "5f9b476644",
+            },
+            "ownerReferences": [
+                {
+                    "apiVersion": "apps/v1",
+                    "kind": "ReplicaSet",
+                    "name": "storefront-5f9b476644",
+                    "uid": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+                    "controller": True,
+                    "blockOwnerDeletion": True,
+                }
+            ],
+        },
+        "spec": {
+            "containers": [{"name": "storefront", "image": "nginx:doesnotexist"}],
+        },
+        "status": {
+            "phase": "Pending",
+            "containerStatuses": [
+                {
+                    "name": "storefront",
+                    "ready": False,
+                    "restartCount": 0,
+                    "state": {
+                        "waiting": {
+                            "reason": "ErrImagePull",
+                            "message": 'Failed to pull image "nginx:doesnotexist"',
+                        }
+                    },
+                }
+            ],
+        },
+    }
+
+
+def test_kind_replicaset_pod_body_resolves_to_deployment() -> None:
+    """kopf delivers a Body/MappingView, not a dict. Dict-only tests missed this."""
+    import kopf
+
+    raw = _kind_storefront_pod()
+    body = kopf.Body(raw)
+    assert type(body).__name__ == "Body"
+    assert not isinstance(body, dict)
+    assert list(vars(body)) == [] or all(str(key).startswith("_") for key in vars(body))
+
+    assert workload_from_pod(raw) == "storefront"
+    assert workload_from_pod(body) == "storefront"
+    assert workload_from_pod(body.metadata) == "storefront"
+
+    apps = FakeApps()
+    apps.replicasets[("demo", "storefront-5f9b476644")] = _replica_set(
+        "storefront-5f9b476644", "nginx:doesnotexist", ready=0
+    )
+    client = _client(apps)
+    assert client.owning_workload("demo", body) == "storefront"
+    assert client.owning_workload("demo", raw) == "storefront"
+
+    from impactgate.controller.watcher import diagnose
+
+    diagnosis = diagnose(body, client=client, reason="ErrImagePull")
+    assert diagnosis.namespace == "demo"
+    assert diagnosis.pod == "storefront-5f9b476644-xr5x5"
+    assert diagnosis.workload == "storefront"
 
 
 def test_healthy_marker_cleared_when_replicas_not_ready() -> None:

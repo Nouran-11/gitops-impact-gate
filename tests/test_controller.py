@@ -511,6 +511,14 @@ def test_workload_from_pod_strips_replicaset_hash() -> None:
     assert workload_from_pod(_real_bug_live_pod()) == "payments"
 
 
+def test_workload_from_pod_resolves_kopf_body() -> None:
+    import kopf
+
+    body = kopf.Body(_real_bug_live_pod())
+    assert not isinstance(body, dict)
+    assert workload_from_pod(body) == "payments"
+
+
 def test_extract_runtime_evidence_includes_command_args() -> None:
     evidence = extract_runtime_evidence(_real_bug_live_pod())
     assert "Traceback (most recent call last)" in evidence

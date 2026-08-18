@@ -144,8 +144,8 @@ class KubernetesClusterClient:
         return lines
 
     def owning_workload(self, namespace: str, pod: Mapping[str, Any]) -> str:
-        meta = _metadata(pod)
-        for owner in _owners(meta):
+        meta, owners = _pod_owners(pod)
+        for owner in owners:
             kind = str(owner.get("kind") or "")
             name = str(owner.get("name") or "")
             if kind in WORKLOAD_KINDS and name:
@@ -160,7 +160,7 @@ class KubernetesClusterClient:
                     if str(rs_owner.get("kind") or "") in WORKLOAD_KINDS and rs_owner.get("name"):
                         return str(rs_owner["name"])
                 return _strip_hash(name)
-        return str(meta.get("name") or "unknown")
+        return _fallback_workload_name(meta)
 
     def replicaset_history(self, namespace: str, workload: str) -> list[str]:
         return [item.name for item in self.list_revisions(namespace, workload)]
@@ -358,8 +358,8 @@ def attach_kubernetes_client(runtime: HasClient) -> ClusterClient:
 
 def workload_from_pod(pod: Mapping[str, Any]) -> str:
     """Deployment/StatefulSet/DaemonSet name, walking ReplicaSet ownerReferences."""
-    metadata = _metadata(pod)
-    for owner in _owners(metadata):
+    metadata, owners = _pod_owners(pod)
+    for owner in owners:
         kind = owner.get("kind")
         name = owner.get("name")
         if not isinstance(name, str) or not name:
@@ -368,7 +368,7 @@ def workload_from_pod(pod: Mapping[str, Any]) -> str:
             return name
         if kind == "ReplicaSet":
             return _strip_hash(name)
-    return str(metadata.get("name") or "unknown")
+    return _fallback_workload_name(metadata)
 
 
 def _load_kubernetes_apis() -> tuple[Any, Any]:
@@ -396,7 +396,10 @@ def _plain(obj: Any) -> Any:
         return obj
     if isinstance(obj, datetime):
         return obj
-    if isinstance(obj, dict):
+    # kopf.Body / MappingView store the real payload in _src. Walking __dict__
+    # drops those keys and yields {}, which made every workload resolve to
+    # "unknown" on the live controller path.
+    if isinstance(obj, Mapping):
         return {str(key): _plain(value) for key, value in obj.items()}
     if isinstance(obj, (list, tuple)):
         return [_plain(item) for item in obj]
@@ -413,12 +416,46 @@ def _plain(obj: Any) -> Any:
 
 
 def _mapping(value: object) -> dict[str, Any]:
+    if isinstance(value, Mapping):
+        return {str(key): value[key] for key in value}
     plain = _plain(value)
     return plain if isinstance(plain, dict) else {}
 
 
 def _metadata(obj: Any) -> dict[str, Any]:
-    return _mapping(_mapping(_plain(obj)).get("metadata"))
+    if isinstance(obj, Mapping):
+        if "metadata" in obj:
+            return _mapping(obj.get("metadata"))
+        return _mapping(obj)
+    plain = _mapping(obj)
+    nested = plain.get("metadata")
+    if nested is not None:
+        return _mapping(nested)
+    return plain
+
+
+def _raw_owner_references(pod: object) -> Any:
+    """Read ownerReferences via the Mapping protocol, not via __dict__ flattening."""
+    if not isinstance(pod, Mapping):
+        meta = _metadata(pod)
+        return meta.get("ownerReferences") or meta.get("owner_references")
+    nested = pod.get("metadata")
+    if isinstance(nested, Mapping):
+        return nested.get("ownerReferences") or nested.get("owner_references")
+    return pod.get("ownerReferences") or pod.get("owner_references")
+
+
+def _pod_owners(pod: Mapping[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    meta = _metadata(pod)
+    owners = _owners(meta)
+    LOGGER.debug(
+        "pod ownerReferences type=%s name=%s raw=%s parsed=%s",
+        type(pod).__name__,
+        meta.get("name"),
+        _raw_owner_references(pod),
+        owners,
+    )
+    return meta, owners
 
 
 def _owners(meta: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -426,6 +463,19 @@ def _owners(meta: Mapping[str, Any]) -> list[dict[str, Any]]:
     if not isinstance(raw, list):
         return []
     return [_mapping(item) for item in raw]
+
+
+def _fallback_workload_name(meta: Mapping[str, Any]) -> str:
+    labels = meta.get("labels") or {}
+    if isinstance(labels, Mapping):
+        pod_hash = labels.get("pod-template-hash")
+        name = meta.get("name")
+        if isinstance(pod_hash, str) and pod_hash and isinstance(name, str):
+            marker = f"-{pod_hash}"
+            idx = name.find(marker)
+            if idx > 0:
+                return name[:idx]
+    return str(meta.get("name") or "unknown")
 
 
 def _list_items(listing: Any) -> list[dict[str, Any]]:
