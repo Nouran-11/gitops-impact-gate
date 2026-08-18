@@ -41,10 +41,31 @@ def controller(
         "--metrics-port",
         help="Port for GET /metrics (default IMPACTGATE_METRICS_PORT or 8000).",
     ),
+    namespace: list[str] | None = typer.Option(
+        None,
+        "--namespace",
+        "-n",
+        help="Namespace to watch (repeatable). Defaults to demo.",
+    ),
+    all_namespaces: bool = typer.Option(
+        False,
+        "--all-namespaces",
+        "-A",
+        help="Watch every namespace (requires cluster-scoped RBAC).",
+    ),
+    verbose: bool = typer.Option(
+        False,
+        "--verbose",
+        "-v",
+        help="DEBUG logs. Default is INFO (same as kopf run without -v).",
+    ),
 ) -> None:
     """Watch the cluster and remediate managed workloads.
 
     Requires IMPACTGATE_CONTROLLER_ENABLED=true.
+
+    This is the supported equivalent of
+    `kopf run -m impactgate.controller.watcher --namespace demo --standalone`.
     """
     settings = load_settings()
     if not settings.controller_enabled:
@@ -54,15 +75,34 @@ def controller(
         )
         raise typer.Exit(code=1)
     port = metrics_port if metrics_port is not None else settings.metrics_port
-    from impactgate.controller import watcher as _watcher
-    from impactgate.metrics import start_http_server
-
-    bound = start_http_server(port)
-    typer.echo(f"metrics listening on :{bound}/metrics")
-    _watcher._register_kopf()
     import kopf
 
-    kopf.run(clusterwide=True, standalone=True)
+    from impactgate.controller.cluster import attach_kubernetes_client
+    from impactgate.controller.watcher import RUNTIME, _register_kopf, reset_runtime
+    from impactgate.metrics import start_http_server
+
+    kopf.configure(verbose=verbose)
+    bound = start_http_server(port)
+    typer.echo(f"metrics listening on :{bound}/metrics")
+    reset_runtime()
+    attach_kubernetes_client(RUNTIME)
+    _register_kopf()
+    namespaces = tuple(namespace) if namespace else ("demo",)
+    if all_namespaces:
+        typer.echo("watching pods cluster-wide")
+        kopf.run(
+            clusterwide=True,
+            standalone=True,
+            registry=kopf.get_default_registry(),
+        )
+        return
+    typer.echo(f"watching pods in namespace(s): {', '.join(namespaces)}")
+    kopf.run(
+        clusterwide=False,
+        namespaces=namespaces,
+        standalone=True,
+        registry=kopf.get_default_registry(),
+    )
 
 
 @app.command()

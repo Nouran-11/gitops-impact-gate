@@ -23,13 +23,20 @@ exists.
 kubectl apply -f deploy/crd.yaml
 kubectl create namespace demo
 kubectl apply -f deploy/policy.yaml
+kubectl apply -f deploy/rbac.yaml
 # optional: kubectl -n demo patch remediationpolicy/default --type merge \
 #   -p '{"spec":{"mode":"enforce"}}'
 
-IMPACTGATE_CONTROLLER_ENABLED=true impactgate controller
+IMPACTGATE_CONTROLLER_ENABLED=true impactgate controller --namespace demo
+# same operator: kopf run -m impactgate.controller.watcher --namespace demo --standalone
+# cluster-wide: impactgate controller --all-namespaces
 # override the scrape port with --metrics-port or IMPACTGATE_METRICS_PORT
 curl localhost:8000/metrics
 ```
+
+The CLI watches namespace `demo` by default and calls `kopf.configure()` so INFO logs appear. `--all-namespaces` needs a ClusterRole with the same verbs.
+
+Required RBAC (see `deploy/rbac.yaml`): get/list/watch on pods, pods/log, events, deployments, replicasets, and remediationpolicies; patch/update on deployments and replicasets; create on events.
 For engineers who change Kubernetes manifests in Git: compute what a pull request breaks in the resource graph, then gate merge and (later) remediate failed workloads.
 
 This repo is a locked build spec (`AGENTS.md`). There is no `src/`, `pyproject.toml`, CLI, or tests in the tree. Do not treat the layout below as files that exist.

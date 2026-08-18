@@ -10,6 +10,7 @@ from impactgate.controller.actions import (
     execute_action,
     last_healthy_revision,
 )
+from impactgate.controller.cluster import KubernetesClusterClient, NullClusterClient
 from impactgate.controller.policy import RemediationPolicy, default_policy
 from impactgate.controller.watcher import Debouncer, compress_logs, handle_failure
 
@@ -19,6 +20,8 @@ __all__ = [
     "CircuitBreaker",
     "Debouncer",
     "Diagnosis",
+    "KubernetesClusterClient",
+    "NullClusterClient",
     "RemediationPolicy",
     "ReplicaSetRevision",
     "classify_failure",
