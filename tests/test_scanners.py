@@ -74,6 +74,7 @@ def test_parse_kubelinter_reports(tmp_path: Path) -> None:
     findings = parse_kubelinter_json(json.dumps(payload), tmp_path / "deployment.yaml")
     assert findings[0].rule == "unset-cpu-requirements"
     assert findings[0].resource.key() == "demo/Deployment/checkout"
+    assert findings[0].severity_floor == Severity.LOW
 
 
 def test_deduplicate_same_rule_and_resource() -> None:

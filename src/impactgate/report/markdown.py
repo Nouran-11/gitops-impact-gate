@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 from impactgate.cache.store import CacheStats
-from impactgate.models import GateDecision, Severity
+from impactgate.models import GateDecision, Severity, Verdict
 from impactgate.report.mermaid import from_paths
 
 COMMENT_MARKER = "<!-- impact-gate -->"
@@ -40,7 +40,12 @@ def render_report(
         decision.reason,
         "",
     ]
-    diagram = from_paths(paths or _paths_from_verdicts(decision))
+    graph_verdicts = [item for item in decision.verdicts if item.origin == "graph"]
+    scanner_verdicts = [item for item in decision.verdicts if item.origin == "scanner"]
+    diagram_paths = paths or [item.path for item in graph_verdicts if item.path]
+    if not diagram_paths:
+        diagram_paths = _paths_from_verdicts(decision)
+    diagram = from_paths(diagram_paths)
     lines.extend(["## Impact graph", "", "```mermaid", diagram, "```", ""])
     if not decision.verdicts:
         lines.append("No findings.")
@@ -49,11 +54,24 @@ def render_report(
             lines.append(cache_stats.render())
         return "\n".join(lines)
 
-    ordered = sorted(decision.verdicts, key=lambda v: _SEVERITY_ORDER[v.severity])
-    lines.append("## Findings")
-    lines.append("")
+    if graph_verdicts:
+        lines.append("## Relationship findings")
+        lines.append("")
+        _append_verdicts(lines, graph_verdicts)
+    if scanner_verdicts:
+        lines.append("## Scanner findings")
+        lines.append("")
+        _append_verdicts(lines, scanner_verdicts)
+    if cache_stats is not None:
+        lines.append(cache_stats.render())
+    return "\n".join(lines)
+
+
+def _append_verdicts(lines: list[str], verdicts: Sequence[Verdict]) -> None:
+    ordered = sorted(verdicts, key=lambda item: (_SEVERITY_ORDER[item.severity], item.rule))
     for verdict in ordered:
-        lines.append(f"### {verdict.severity.value}: `{verdict.finding_id}`")
+        title = verdict.rule or verdict.finding_id
+        lines.append(f"### {verdict.severity.value}: `{title}`")
         lines.append("")
         lines.append(verdict.explanation)
         lines.append("")
@@ -62,14 +80,14 @@ def render_report(
             lines.append(verdict.suggested_fix)
             lines.append("```")
             lines.append("")
-    if cache_stats is not None:
-        lines.append(cache_stats.render())
-    return "\n".join(lines)
 
 
 def _paths_from_verdicts(decision: GateDecision) -> list[list[str]]:
     paths: list[list[str]] = []
     for verdict in decision.verdicts:
+        if verdict.path:
+            paths.append(list(verdict.path))
+            continue
         marker = "Path: "
         if marker in verdict.explanation:
             rendered = verdict.explanation.split(marker, 1)[-1].rstrip(".")

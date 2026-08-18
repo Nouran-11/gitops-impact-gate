@@ -25,6 +25,7 @@ def test_selector_break_reports_exposed_broken_selector() -> None:
     assert "demo/Service/checkout" in finding.path
     assert finding.severity_floor == Severity.CRITICAL
     assert "checkout" in finding.evidence
+    assert "demo/Deployment/checkout" in finding.path
 
 
 def test_internal_broken_selector_is_medium() -> None:
@@ -85,15 +86,45 @@ def test_cli_selector_break_after_dir(tmp_path: Path, monkeypatch: pytest.Monkey
         encoding="utf-8",
     )
 
-    async def no_scanners(_files: object, **_kwargs: object) -> list[Finding]:
-        return []
+    scanner_finding = Finding(
+        id=compute_finding_id("unset-cpu-requirements", "demo/Deployment/checkout", "cpu"),
+        origin="scanner",
+        rule="unset-cpu-requirements",
+        resource=ResourceRef(
+            api_version="apps/v1", kind="Deployment", name="checkout", namespace="demo"
+        ),
+        path=["demo/File/checkout"],
+        evidence="deployment.yaml: container is missing cpu requests",
+        severity_floor=Severity.LOW,
+    )
 
-    monkeypatch.setattr("impactgate.cli.run_all_scanners", no_scanners)
+    async def fake_scanners(_files: object, **_kwargs: object) -> list[Finding]:
+        return [scanner_finding]
+
+    monkeypatch.setattr("impactgate.cli.run_all_scanners", fake_scanners)
     result = runner.invoke(app, ["analyze", str(after_dir), "--before", str(before_dir)])
     assert result.exit_code == 0, result.output
     assert "**Risk:** high" in result.output
     assert "broken-selector" in result.output
     assert "demo/Ingress/public" in result.output
+    assert "critical" in result.output
+    assert "## Relationship findings" in result.output
+    assert "## Scanner findings" in result.output
+    assert result.output.index("## Relationship findings") < result.output.index(
+        "## Scanner findings"
+    )
+    assert result.output.index("broken-selector") < result.output.index("unset-cpu-requirements")
+    assert "unset-cpu-requirements" in result.output
+    rel = result.output.split("## Scanner findings", 1)[0]
+    assert "critical" in rel
+    scan = result.output.split("## Scanner findings", 1)[1]
+    assert "### high:" not in scan
+    mermaid = result.output.split("```mermaid", 1)[1].split("```", 1)[0]
+    assert "-->" in mermaid
+    assert "demo/Ingress/public" in mermaid
+    assert "demo/Service/checkout" in mermaid
+    assert "demo/Deployment/checkout" in mermaid
+    assert "File/checkout" not in mermaid
 
 
 def test_cli_merges_scanner_findings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -95,11 +95,13 @@ def _ref_from_checkov_resource(resource_id: str | None, source: Path) -> Resourc
 
 def _severity(value: object) -> Severity:
     if not isinstance(value, str):
-        return Severity.MEDIUM
+        return Severity.LOW
     mapping = {
         "CRITICAL": Severity.CRITICAL,
         "HIGH": Severity.HIGH,
         "MEDIUM": Severity.MEDIUM,
         "LOW": Severity.LOW,
+        "INFO": Severity.LOW,
+        "UNKNOWN": Severity.LOW,
     }
-    return mapping.get(value.upper(), Severity.MEDIUM)
+    return mapping.get(value.upper(), Severity.LOW)

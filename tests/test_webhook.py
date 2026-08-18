@@ -83,10 +83,29 @@ def test_status_mapping() -> None:
 
 def test_mermaid_from_selector_break_path() -> None:
     source = from_paths(
-        [["demo/Ingress/public", "demo/Service/checkout", "(no pods)"]]
+        [["demo/Ingress/public", "demo/Service/checkout", "demo/Deployment/checkout", "(no pods)"]]
     )
     assert "flowchart LR" in source
     assert "Ingress" in source
+    assert "Service" in source
+    assert "Deployment" in source
+    assert "-->" in source
+    assert "(no pods)" not in source
+    assert "demo_Ingress_public --> demo_Service_checkout" in source
+    assert "demo_Service_checkout --> demo_Deployment_checkout" in source
+
+
+def test_mermaid_omits_scanner_pseudo_nodes() -> None:
+    source = from_paths(
+        [
+            ["demo/File/checkout"],
+            ["_cluster/Kubernetes/deployment"],
+            ["demo/Ingress/public", "demo/Service/checkout"],
+        ]
+    )
+    assert "File" not in source
+    assert "Kubernetes" not in source
+    assert "demo/Ingress/public" in source
     assert "-->" in source
 
 

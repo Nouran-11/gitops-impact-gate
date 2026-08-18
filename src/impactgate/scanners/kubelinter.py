@@ -59,6 +59,7 @@ def _finding_from_report(report: dict[str, Any], source: Path) -> Finding | None
     elif isinstance(report.get("Message"), str):
         message = report["Message"]
     evidence = message or rule
+    floor = Severity.LOW if _is_style_check(rule) else Severity.MEDIUM
     ref = _ref_from_object(report.get("Object"), source)
     return Finding(
         id=compute_finding_id(rule, ref.key(), evidence),
@@ -67,7 +68,7 @@ def _finding_from_report(report: dict[str, Any], source: Path) -> Finding | None
         resource=ref,
         path=[ref.key()],
         evidence=f"{source.name}: {evidence}",
-        severity_floor=Severity.MEDIUM,
+        severity_floor=floor,
     )
 
 
@@ -87,3 +88,7 @@ def _ref_from_object(obj: object, source: Path) -> ResourceRef:
     if namespace is not None and not isinstance(namespace, str):
         namespace = None
     return ResourceRef(api_version="v1", kind=kind, name=name, namespace=namespace)
+
+
+def _is_style_check(rule: str) -> bool:
+    return rule.startswith("unset-") or rule in {"use-namespace"}

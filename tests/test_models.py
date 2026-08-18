@@ -126,3 +126,4 @@ def test_render_report_includes_verdicts() -> None:
     assert "**Risk:** high" in rendered
     assert "Selector matches no pods." in rendered
     assert "```suggestion" in rendered
+    assert "## Relationship findings" in rendered

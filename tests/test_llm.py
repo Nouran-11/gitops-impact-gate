@@ -8,7 +8,7 @@ import httpx
 import pytest
 
 from impactgate.analysis.severity import raise_only
-from impactgate.llm import FakeProvider, explain_findings, parse_verdicts
+from impactgate.llm import BATCH_SIZE, FakeProvider, explain_findings, needs_llm, parse_verdicts
 from impactgate.llm.provider import (
     FallbackProvider,
     PermanentError,
@@ -172,3 +172,89 @@ def test_build_provider_wires_ollama_model(monkeypatch: pytest.MonkeyPatch) -> N
     assert from_env.providers[0].model == "mistral:7b"
     override = build_provider("ollama", ollama_model="qwen2.5:7b")
     assert override.providers[0].model == "qwen2.5:7b"
+
+
+def test_group_packs_unique_rules_into_batches_of_ten() -> None:
+    findings = [_numbered_finding(index) for index in range(40)]
+    provider = FakeProvider()
+    asyncio.run(explain_findings(findings, provider=provider))
+    assert len(provider.calls) == 4
+    assert BATCH_SIZE == 10
+
+
+def test_style_scanner_findings_skip_llm() -> None:
+    graph = _finding()
+    scanner = Finding(
+        id=compute_finding_id("unset-cpu-requirements", "demo/Deployment/checkout", "cpu"),
+        origin="scanner",
+        rule="unset-cpu-requirements",
+        resource=ResourceRef(
+            api_version="apps/v1", kind="Deployment", name="checkout", namespace="demo"
+        ),
+        path=["demo/Deployment/checkout"],
+        evidence="deployment.yaml: container is missing cpu requests",
+        severity_floor=Severity.LOW,
+    )
+    provider = FakeProvider()
+    verdicts = asyncio.run(explain_findings([graph, scanner], provider=provider))
+    assert needs_llm(graph) is True
+    assert needs_llm(scanner) is False
+    assert len(provider.calls) == 1
+    assert verdicts[1].explanation == scanner.evidence
+    assert verdicts[1].severity == Severity.LOW
+    assert verdicts[0].severity == Severity.CRITICAL
+
+
+def test_unmatched_finding_id_degrades_instead_of_attaching() -> None:
+    first = _finding("broken-selector")
+    second = _finding("unreachable-workload")
+    payload = {
+        "verdicts": [
+            {
+                "finding_id": None,
+                "severity": "high",
+                "explanation": "The same generic sentence for every finding.",
+                "suggested_fix": None,
+                "confidence": 0.9,
+            }
+        ]
+    }
+    provider = FakeProvider(responses=[json.dumps(payload)])
+    verdicts = asyncio.run(explain_findings([first, second], provider=provider))
+    assert all("unavailable" in item.explanation for item in verdicts)
+    assert verdicts[0].finding_id == first.id
+    assert verdicts[1].finding_id == second.id
+
+
+def test_severity_floor_is_per_finding() -> None:
+    graph = _finding()
+    scanner = Finding(
+        id="scanner-low",
+        origin="scanner",
+        rule="unset-cpu-requirements",
+        resource=ResourceRef(
+            api_version="apps/v1", kind="Deployment", name="checkout", namespace="demo"
+        ),
+        path=["demo/Deployment/checkout"],
+        evidence="cpu requests missing",
+        severity_floor=Severity.LOW,
+    )
+    provider = FakeProvider()
+    verdicts = asyncio.run(explain_findings([graph, scanner], provider=provider))
+    by_rule = {item.rule: item for item in verdicts}
+    assert by_rule["broken-selector"].severity == Severity.CRITICAL
+    assert by_rule["unset-cpu-requirements"].severity == Severity.LOW
+
+
+def _numbered_finding(index: int) -> Finding:
+    ref = ResourceRef(api_version="v1", kind="Service", name=f"svc-{index}", namespace="demo")
+    evidence = f"finding {index}"
+    return Finding(
+        id=compute_finding_id(f"rule-{index}", ref.key(), evidence),
+        origin="graph",
+        rule=f"rule-{index}",
+        resource=ref,
+        path=[ref.key()],
+        evidence=evidence,
+        severity_floor=Severity.MEDIUM,
+    )
