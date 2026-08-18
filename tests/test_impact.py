@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+import yaml
 from typer.testing import CliRunner
 
 from impactgate.analysis.impact import compute_impact
@@ -70,6 +71,63 @@ spec:
     result = compute_impact(before, after, ["deployment.yaml"])
     broken = [item for item in result.findings if item.rule == "broken-selector"]
     assert broken[0].severity_floor == Severity.MEDIUM
+
+
+def test_cli_selector_break_real_directories(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Headline scenario through the CLI: matching before is clean; renamed after is critical."""
+    root = Path(__file__).resolve().parents[1] / "demo" / "manifests" / "selector-break"
+    before_dir = tmp_path / "before"
+    after_dir = tmp_path / "after"
+    _copy_yaml_dir(root, before_dir)
+    _copy_yaml_dir(root, after_dir)
+    _set_pod_template_app(after_dir / "deployment.yaml", "checkout-v2")
+
+    async def fake_scanners(_files: object, **_kwargs: object) -> list[Finding]:
+        return []
+
+    monkeypatch.setattr("impactgate.cli.run_all_scanners", fake_scanners)
+
+    before_result = runner.invoke(app, ["analyze", str(before_dir), "--no-cache"])
+    assert before_result.exit_code == 0, before_result.output
+    assert "## Relationship findings" not in before_result.output
+    assert "broken-selector" not in before_result.output
+
+    result = runner.invoke(
+        app, ["analyze", str(after_dir), "--before", str(before_dir), "--no-cache"]
+    )
+    assert result.exit_code == 0, result.output
+    assert "## Relationship findings" in result.output
+    relationship = result.output.split("## Relationship findings", 1)[1]
+    if "## Scanner findings" in relationship:
+        relationship = relationship.split("## Scanner findings", 1)[0]
+    headings = [line for line in relationship.splitlines() if line.startswith("### ")]
+    broken = [line for line in headings if "broken-selector" in line]
+    assert len(broken) == 1, result.output
+    assert "critical" in broken[0]
+    assert "demo/Ingress/public" in relationship
+    assert "demo/Service/checkout" in relationship
+    assert "**Risk:** high" in result.output
+
+
+def test_cli_service_matches_pod_labels_not_match_labels(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Correct Service must not fire when only Deployment.matchLabels disagrees."""
+    root = Path(__file__).resolve().parents[1] / "demo" / "manifests" / "selector-break"
+    matching = tmp_path / "matching"
+    _copy_yaml_dir(root, matching)
+    _set_match_labels_app(matching / "deployment.yaml", "checkout-v2")
+
+    async def fake_scanners(_files: object, **_kwargs: object) -> list[Finding]:
+        return []
+
+    monkeypatch.setattr("impactgate.cli.run_all_scanners", fake_scanners)
+    result = runner.invoke(app, ["analyze", str(matching), "--no-cache"])
+    assert result.exit_code == 0, result.output
+    assert "## Relationship findings" not in result.output
+    assert "broken-selector" not in result.output
 
 
 def test_cli_selector_break_after_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -182,6 +240,24 @@ def test_cli_merges_scanner_findings(tmp_path: Path, monkeypatch: pytest.MonkeyP
     assert "## Impact graph" not in result.output
     assert "no impact" not in result.output
     assert "```suggestion" not in result.output
+
+
+def _copy_yaml_dir(src: Path, dest: Path) -> None:
+    dest.mkdir(parents=True)
+    for path in src.glob("*.yaml"):
+        (dest / path.name).write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
+
+
+def _set_pod_template_app(path: Path, value: str) -> None:
+    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    data["spec"]["template"]["metadata"]["labels"]["app"] = value
+    path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+
+
+def _set_match_labels_app(path: Path, value: str) -> None:
+    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    data["spec"]["selector"]["matchLabels"]["app"] = value
+    path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
 
 
 def _relabel_pod_template(text: str) -> str:

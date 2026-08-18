@@ -47,6 +47,31 @@ spec:
 """
 
 
+def test_broken_selector_ignores_deployment_match_labels() -> None:
+    findings = broken_selector(
+        graph_from_yaml(
+            """
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: checkout, namespace: demo}
+spec:
+  selector: {matchLabels: {app: checkout-v2}}
+  template:
+    metadata: {labels: {app: checkout}}
+    spec:
+      containers: [{name: app, image: nginx:1.25}]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: checkout, namespace: demo}
+spec:
+  selector: {app: checkout}
+"""
+        )
+    )
+    assert findings == []
+
+
 def test_broken_selector_positive() -> None:
     findings = broken_selector(graph_from_yaml(BROKEN))
     assert len(findings) == 1

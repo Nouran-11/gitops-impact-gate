@@ -6,7 +6,14 @@ from collections.abc import Callable
 
 import networkx as nx
 
-from impactgate.graph.edges import SELECTS_WORKLOAD_KINDS, is_virtual_key
+from impactgate.graph.edges import (
+    SELECTS_WORKLOAD_KINDS,
+    is_virtual_key,
+    pod_labels,
+    selector_matches,
+    service_selector,
+    service_selects_workload,
+)
 from impactgate.models import EdgeKind, Finding, Resource, Severity, compute_finding_id
 
 DANGLING_KINDS = frozenset(
@@ -47,16 +54,16 @@ def broken_selector(
 ) -> list[Finding]:
     del before
     findings: list[Finding] = []
-    for node, data in graph.nodes(data=True):
+    for _, data in graph.nodes(data=True):
         if data.get("kind") != "Service":
             continue
         resource = data.get("resource")
         if not isinstance(resource, Resource):
             continue
-        selector = _service_selector(resource)
-        if selector is None:
+        selector = service_selector(resource)
+        if not selector:
             continue
-        if _selects_workload(graph, node):
+        if _matches_workload(graph, resource):
             continue
         evidence = f"spec.selector {_format_selector(selector)} matches no workload"
         findings.append(_finding("broken-selector", resource, evidence))
@@ -157,12 +164,13 @@ def _finding(rule: str, resource: Resource, evidence: str) -> Finding:
     )
 
 
-def _selects_workload(graph: nx.DiGraph[str], service: str) -> bool:
-    for _, target, edge_data in graph.out_edges(service, data=True):
-        if edge_data.get("kind") != EdgeKind.SELECTS:
+def _matches_workload(graph: nx.DiGraph[str], service: Resource) -> bool:
+    """Match Service.spec.selector against pod template labels, not Deployment matchLabels."""
+    for _, data in graph.nodes(data=True):
+        if data.get("kind") not in SELECTS_WORKLOAD_KINDS or data.get("missing"):
             continue
-        target_data = graph.nodes[target]
-        if target_data.get("kind") in SELECTS_WORKLOAD_KINDS and not target_data.get("missing"):
+        workload = data.get("resource")
+        if isinstance(workload, Resource) and service_selects_workload(service, workload):
             return True
     return False
 
@@ -170,24 +178,26 @@ def _selects_workload(graph: nx.DiGraph[str], service: str) -> bool:
 def _is_selected(graph: nx.DiGraph[str], workload: str) -> bool:
     if workload not in graph:
         return False
-    for source, _, edge_data in graph.in_edges(workload, data=True):
-        if edge_data.get("kind") != EdgeKind.SELECTS:
+    resource = graph.nodes[workload].get("resource")
+    if not isinstance(resource, Resource):
+        return False
+    labels = pod_labels(resource)
+    if labels is None:
+        return False
+    for _, data in graph.nodes(data=True):
+        if data.get("kind") != "Service":
             continue
-        if graph.nodes[source].get("kind") == "Service":
+        service = data.get("resource")
+        if not isinstance(service, Resource):
+            continue
+        selector = service_selector(service)
+        if selector and selector_matches(selector, labels) and _same_namespace(service, resource):
             return True
     return False
 
 
-def _service_selector(resource: Resource) -> dict[str, str] | None:
-    spec = resource.spec.get("spec")
-    if not isinstance(spec, dict):
-        return None
-    selector = spec.get("selector")
-    if selector is None:
-        return None
-    if not isinstance(selector, dict):
-        return None
-    return {str(key): str(value) for key, value in selector.items()}
+def _same_namespace(left: Resource, right: Resource) -> bool:
+    return left.ref.namespace == right.ref.namespace
 
 
 def _format_selector(selector: dict[str, str]) -> str:

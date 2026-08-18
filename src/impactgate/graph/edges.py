@@ -45,8 +45,8 @@ def extract_selects(resources: list[Resource]) -> list[Edge]:
     for service in resources:
         if service.ref.kind != "Service":
             continue
-        selector = _as_str_map(_nested(service.spec, "spec", "selector"))
-        if selector is None:
+        selector = service_selector(service)
+        if not selector:
             continue
         detail = f"selector {_format_labels(selector)}"
         labelset_target = _labelset_key(service.ref.namespace, selector)
@@ -61,8 +61,7 @@ def extract_selects(resources: list[Resource]) -> list[Edge]:
         for workload in workloads:
             if not _same_namespace(service, workload):
                 continue
-            labels = pod_labels(workload)
-            if labels is not None and _selector_matches(selector, labels):
+            if service_selects_workload(service, workload):
                 edges.append(
                     Edge(
                         source=service.ref.key(),
@@ -309,7 +308,8 @@ def extract_targets(resources: list[Resource]) -> list[Edge]:
     for policy in resources:
         if policy.ref.kind != "NetworkPolicy":
             continue
-        selector = _as_str_map(_nested(policy.spec, "spec", "podSelector", "matchLabels"))
+        spec = k8s_spec(policy)
+        selector = _as_str_map(_nested(spec, "podSelector", "matchLabels")) if spec else None
         if selector is None:
             selector = {}
         detail = f"podSelector {_format_labels(selector)}"
@@ -317,7 +317,7 @@ def extract_targets(resources: list[Resource]) -> list[Edge]:
             if not _same_namespace(policy, workload):
                 continue
             labels = pod_labels(workload)
-            if labels is not None and _selector_matches(selector, labels):
+            if labels is not None and selector_matches(selector, labels):
                 edges.append(
                     Edge(
                         source=policy.ref.key(),
@@ -364,34 +364,83 @@ EXTRACTORS: tuple[Callable[[list[Resource]], list[Edge]], ...] = (
 )
 
 
+def k8s_spec(resource: Resource) -> dict[str, Any] | None:
+    """Return the Kubernetes ``spec`` object from a full manifest or a spec-only dict."""
+    raw = resource.spec
+    if not isinstance(raw, dict):
+        return None
+    inner = raw.get("spec")
+    if any(key in raw for key in ("apiVersion", "kind", "metadata")):
+        return inner if isinstance(inner, dict) else None
+    if isinstance(inner, dict) and "template" not in raw:
+        return inner
+    return raw
+
+
+def pod_template(resource: Resource) -> dict[str, Any] | None:
+    """Return the pod template. Never uses ``spec.selector.matchLabels``."""
+    kind = resource.ref.kind
+    if kind not in POD_TEMPLATE_WORKLOAD_KINDS or kind == "Pod":
+        return None
+    spec = k8s_spec(resource)
+    if spec is None:
+        return None
+    if kind == "CronJob":
+        template = _nested(spec, "jobTemplate", "spec", "template")
+        return template if isinstance(template, dict) else None
+    template = spec.get("template")
+    return template if isinstance(template, dict) else None
+
+
 def pod_spec(resource: Resource) -> dict[str, Any] | None:
     kind = resource.ref.kind
     if kind not in POD_TEMPLATE_WORKLOAD_KINDS:
         return None
     if kind == "Pod":
-        spec = resource.spec.get("spec")
+        spec = k8s_spec(resource)
         return spec if isinstance(spec, dict) else None
-    if kind == "CronJob":
-        spec = _nested(resource.spec, "spec", "jobTemplate", "spec", "template", "spec")
-        return spec if isinstance(spec, dict) else None
-    spec = _nested(resource.spec, "spec", "template", "spec")
+    template = pod_template(resource)
+    if template is None:
+        return None
+    spec = template.get("spec")
     return spec if isinstance(spec, dict) else None
 
 
 def pod_labels(resource: Resource) -> dict[str, str] | None:
+    """Labels a Service selects: pod template labels, not Deployment ``matchLabels``."""
     kind = resource.ref.kind
     if kind == "Pod":
         labels = _nested(resource.spec, "metadata", "labels")
+        if labels is None:
+            labels = _nested(k8s_spec(resource) or {}, "metadata", "labels")
         return _as_str_map(labels) or {}
-    if kind == "CronJob":
-        labels = _nested(
-            resource.spec, "spec", "jobTemplate", "spec", "template", "metadata", "labels"
-        )
-        return _as_str_map(labels)
-    if kind in POD_TEMPLATE_WORKLOAD_KINDS:
-        labels = _nested(resource.spec, "spec", "template", "metadata", "labels")
-        return _as_str_map(labels)
-    return None
+    template = pod_template(resource)
+    if template is None:
+        return None
+    return _as_str_map(_nested(template, "metadata", "labels"))
+
+
+def service_selector(resource: Resource) -> dict[str, str] | None:
+    """``Service.spec.selector`` as a label map. Does not unwrap ``matchLabels``."""
+    spec = k8s_spec(resource)
+    if spec is None:
+        return None
+    return _as_str_map(spec.get("selector"))
+
+
+def service_selects_workload(service: Resource, workload: Resource) -> bool:
+    """True when the Service selector is a subset of the workload's pod labels."""
+    if not _same_namespace(service, workload):
+        return False
+    selector = service_selector(service)
+    if not selector:
+        return False
+    labels = pod_labels(workload)
+    return labels is not None and selector_matches(selector, labels)
+
+
+def selector_matches(selector: Mapping[str, str], labels: Mapping[str, str]) -> bool:
+    return all(labels.get(key) == value for key, value in selector.items())
 
 
 def image_key(image: str) -> str:
@@ -497,10 +546,6 @@ def _format_labels(labels: Mapping[str, str]) -> str:
     return ",".join(f"{key}={value}" for key, value in sorted(labels.items()))
 
 
-def _selector_matches(selector: Mapping[str, str], labels: Mapping[str, str]) -> bool:
-    return all(labels.get(key) == value for key, value in selector.items())
-
-
 def _same_namespace(left: Resource, right: Resource) -> bool:
     return left.ref.namespace == right.ref.namespace
 
@@ -520,8 +565,12 @@ def _as_str_map(value: object) -> dict[str, str] | None:
         return None
     result: dict[str, str] = {}
     for key, item in value.items():
-        if isinstance(key, str) and isinstance(item, str):
+        if not isinstance(key, str):
+            continue
+        if isinstance(item, str):
             result[key] = item
+        elif isinstance(item, int | float) and not isinstance(item, bool):
+            result[key] = str(item)
     return result
 
 
