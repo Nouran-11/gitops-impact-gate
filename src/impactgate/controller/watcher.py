@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import logging
+import os
+import subprocess
 from collections import defaultdict
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 from impactgate.controller.actions import (
@@ -136,6 +139,10 @@ class NullClusterClient:
         del namespace, pod
         return ""
 
+    def current_logs(self, namespace: str, pod: str) -> str:
+        del namespace, pod
+        return ""
+
     def pod_events(self, namespace: str, pod: str) -> list[str]:
         del namespace, pod
         return []
@@ -177,6 +184,142 @@ class NullClusterClient:
 
     def record_audit(self, record: AuditRecord) -> None:
         del record
+
+
+class KubernetesClusterClient(NullClusterClient):
+    """Live cluster access. Log fetches try previous, then the current container."""
+
+    def previous_logs(self, namespace: str, pod: str) -> str:
+        return read_pod_logs(namespace, pod, previous=True)
+
+    def current_logs(self, namespace: str, pod: str) -> str:
+        return read_pod_logs(namespace, pod, previous=False)
+
+
+def extract_runtime_evidence(pod: Mapping[str, Any]) -> str:
+    """Evidence kopf already has on the pod body — used when log APIs are empty.
+
+    Containers that print a traceback and exit 1 often have no *previous*
+    instance, so ``kubectl logs --previous`` is empty. Status messages and the
+    container command/args still sit on the object and must reach the classifier.
+    """
+    lines: list[str] = []
+    spec_obj = pod.get("spec")
+    spec = spec_obj if isinstance(spec_obj, dict) else {}
+    for container in _as_list(spec.get("containers")):
+        if not isinstance(container, dict):
+            continue
+        name = str(container.get("name") or "container")
+        command = [str(item) for item in _as_list(container.get("command"))]
+        args = [str(item) for item in _as_list(container.get("args"))]
+        joined = " ".join([*command, *args]).strip()
+        if joined:
+            lines.append(f"container {name} command: {joined}")
+    status_obj = pod.get("status")
+    status = status_obj if isinstance(status_obj, dict) else {}
+    for key in ("containerStatuses", "initContainerStatuses"):
+        for container in _as_list(status.get(key)):
+            if not isinstance(container, dict):
+                continue
+            name = str(container.get("name") or "container")
+            for state_name in ("state", "lastState"):
+                state_obj = container.get(state_name)
+                state = state_obj if isinstance(state_obj, dict) else {}
+                waiting_obj = state.get("waiting")
+                waiting = waiting_obj if isinstance(waiting_obj, dict) else {}
+                terminated_obj = state.get("terminated")
+                terminated = terminated_obj if isinstance(terminated_obj, dict) else {}
+                message = waiting.get("message") or terminated.get("message")
+                reason = waiting.get("reason") or terminated.get("reason")
+                exit_code = terminated.get("exitCode")
+                if reason:
+                    lines.append(f"container {name} {state_name} reason: {reason}")
+                if exit_code is not None:
+                    lines.append(f"container {name} {state_name} exitCode: {exit_code}")
+                if message:
+                    lines.append(f"container {name} {state_name} message: {message}")
+    return "\n".join(lines)
+
+
+def read_pod_logs(namespace: str, name: str, *, previous: bool) -> str:
+    """Fetch container logs. Empty is normal when a container exits instead of crashing."""
+    for reader in (_logs_via_kubernetes, _logs_via_incluster, _logs_via_kubectl):
+        try:
+            text = reader(namespace, name, previous=previous)
+        except Exception:
+            LOGGER.debug(
+                "log reader %s failed for %s/%s",
+                reader.__name__,
+                namespace,
+                name,
+                exc_info=True,
+            )
+            continue
+        if text.strip():
+            return text
+    return ""
+
+
+def _logs_via_kubernetes(namespace: str, name: str, *, previous: bool) -> str:
+    from kubernetes import client, config  # type: ignore[import-not-found]
+
+    try:
+        config.load_incluster_config()
+    except Exception:
+        config.load_kube_config()
+    api = client.CoreV1Api()
+    text = api.read_namespaced_pod_log(
+        name=name,
+        namespace=namespace,
+        previous=previous,
+        timestamps=False,
+        tail_lines=400,
+    )
+    return text if isinstance(text, str) else ""
+
+
+def _logs_via_incluster(namespace: str, name: str, *, previous: bool) -> str:
+    host = os.environ.get("KUBERNETES_SERVICE_HOST")
+    token_file = Path("/var/run/secrets/kubernetes.io/serviceaccount/token")
+    if not host or not token_file.is_file():
+        return ""
+    port = os.environ.get("KUBERNETES_SERVICE_PORT", "443")
+    token = token_file.read_text(encoding="utf-8").strip()
+    ca = Path("/var/run/secrets/kubernetes.io/serviceaccount/ca.crt")
+    import httpx
+
+    params: dict[str, str] = {"tailLines": "400"}
+    if previous:
+        params["previous"] = "true"
+    url = f"https://{host}:{port}/api/v1/namespaces/{namespace}/pods/{name}/log"
+    verify: str | bool = str(ca) if ca.is_file() else False
+    with httpx.Client(verify=verify, timeout=10.0) as http:
+        response = http.get(
+            url,
+            headers={"Authorization": f"Bearer {token}"},
+            params=params,
+        )
+    if response.status_code == 200:
+        return response.text
+    return ""
+
+
+def _logs_via_kubectl(namespace: str, name: str, *, previous: bool) -> str:
+    cmd = [
+        "kubectl",
+        "logs",
+        "-n",
+        namespace,
+        name,
+        "--tail=400",
+        "--all-containers=true",
+    ]
+    if previous:
+        cmd.append("--previous")
+    completed = subprocess.run(cmd, capture_output=True, text=True, timeout=10, check=False)
+    if completed.returncode == 0:
+        return completed.stdout or ""
+    return ""
 
 
 def workload_from_pod(pod: Mapping[str, Any]) -> str:
@@ -265,20 +408,38 @@ def diagnose(
     *,
     client: ClusterClient,
     reason: str,
+    logger: logging.Logger = LOGGER,
 ) -> Diagnosis:
     metadata = pod.get("metadata") or {}
     namespace = str(metadata.get("namespace") or "default")
     name = str(metadata.get("name") or "unknown")
-    logs = client.previous_logs(namespace, name)
+    previous = client.previous_logs(namespace, name)
+    # Containers that print and exit (real-bug demo) often have no previous
+    # instance; the traceback is on the current/last terminated container.
+    current = "" if previous.strip() else client.current_logs(namespace, name)
+    inline = extract_runtime_evidence(pod)
+    combined = "\n".join(part for part in (previous, current, inline) if part.strip())
     events = client.pod_events(namespace, name)
     workload = client.owning_workload(namespace, pod)
     history = client.replicaset_history(namespace, workload)
+    compressed = compress_logs(combined)
+    logger.debug(
+        "diagnose %s/%s reason=%s previous_empty=%s current_empty=%s "
+        "inline_chars=%d evidence=%s",
+        namespace,
+        name,
+        reason,
+        not previous.strip(),
+        not current.strip(),
+        len(inline),
+        compressed or "<empty>",
+    )
     return Diagnosis(
         namespace=namespace,
         pod=name,
         workload=workload,
         reason=reason,
-        compressed_logs=compress_logs(logs),
+        compressed_logs=compressed,
         events=[*events, *history],
         managed=is_managed(pod),
     )
@@ -299,7 +460,7 @@ def handle_failure(
     if not is_managed(pod):
         logger.info("skipping unmanaged pod %s", (pod.get("metadata") or {}).get("name"))
         return None
-    diagnosis = diagnose(pod, client=client, reason=reason)
+    diagnosis = diagnose(pod, client=client, reason=reason, logger=logger)
     key = f"{diagnosis.namespace}/{diagnosis.workload}"
     REGISTRY.note_detection(key, at=now)
     if not debouncer.record(key, at=now):
@@ -349,7 +510,7 @@ def _as_list(value: object) -> list[Any]:
     return value if isinstance(value, list) else []
 
 
-RUNTIME = ControllerRuntime()
+RUNTIME = ControllerRuntime(client=KubernetesClusterClient())
 
 
 def reset_runtime(

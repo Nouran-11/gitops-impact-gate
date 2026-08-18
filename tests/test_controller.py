@@ -5,6 +5,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+import pytest
+
 from impactgate.controller.actions import (
     Action,
     AuditRecord,
@@ -18,11 +20,15 @@ from impactgate.controller.actions import (
 from impactgate.controller.policy import RemediationPolicy, default_policy, policy_from_crd
 from impactgate.controller.watcher import (
     Debouncer,
+    KubernetesClusterClient,
     NullClusterClient,
     compress_logs,
+    diagnose,
+    extract_runtime_evidence,
     extract_waiting_reason,
     handle_failure,
     is_managed,
+    workload_from_pod,
 )
 
 NOW = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
@@ -31,6 +37,7 @@ NOW = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
 @dataclass
 class RecordingClusterClient:
     logs: str = ""
+    current: str = ""
     events: list[str] = field(default_factory=list)
     workload_name: str = "storefront"
     revisions: list[ReplicaSetRevision] = field(default_factory=list)
@@ -44,6 +51,10 @@ class RecordingClusterClient:
     def previous_logs(self, namespace: str, pod: str) -> str:
         del namespace, pod
         return self.logs
+
+    def current_logs(self, namespace: str, pod: str) -> str:
+        del namespace, pod
+        return self.current
 
     def pod_events(self, namespace: str, pod: str) -> list[str]:
         del namespace, pod
@@ -124,6 +135,61 @@ def _pod(*, reason: str, managed: bool = True, oom: bool = False) -> dict[str, o
                     "name": "app",
                     "state": {"waiting": waiting} if waiting else {"running": {}},
                     "lastState": {"terminated": terminated},
+                }
+            ]
+        },
+    }
+
+
+REAL_BUG_TRACEBACK = "Traceback (most recent call last):\nValueError: boom"
+REAL_BUG_ARGS = (
+    "echo 'Traceback (most recent call last):'; echo 'ValueError: boom'; exit 1"
+)
+
+
+def _real_bug_live_pod(*, include_traceback_in_args: bool = True) -> dict[str, object]:
+    """Shape of the kind pod after applying demo/manifests/real-bug/broken.patch."""
+    args = [REAL_BUG_ARGS] if include_traceback_in_args else ["python", "/app.py"]
+    return {
+        "metadata": {
+            "name": "payments-7c54d8f58f-hrc87",
+            "namespace": "demo",
+            "labels": {
+                "app": "payments",
+                "impactgate.io/managed": "true",
+                "pod-template-hash": "7c54d8f58f",
+            },
+            "ownerReferences": [
+                {"kind": "ReplicaSet", "name": "payments-7c54d8f58f", "controller": True}
+            ],
+        },
+        "spec": {
+            "containers": [
+                {
+                    "name": "payments",
+                    "image": "nginx:1.25",
+                    "command": ["/bin/sh", "-c"] if include_traceback_in_args else ["python"],
+                    "args": args if include_traceback_in_args else ["/app.py"],
+                }
+            ]
+        },
+        "status": {
+            "containerStatuses": [
+                {
+                    "name": "payments",
+                    "state": {
+                        "waiting": {
+                            "reason": "CrashLoopBackOff",
+                            "message": "back-off restarting failed container=payments",
+                        }
+                    },
+                    "lastState": {
+                        "terminated": {
+                            "exitCode": 1,
+                            "reason": "Error",
+                            "message": "",
+                        }
+                    },
                 }
             ]
         },
@@ -362,6 +428,101 @@ def test_real_bug_demo_escalates_instead_of_remediating() -> None:
     assert client.restarts == []
     assert client.audits[0].classification == Action.ESCALATE
     assert client.audits[0].outcome == "escalated"
+
+
+def test_diagnose_falls_back_to_current_logs_when_previous_empty() -> None:
+    """Containers that print and exit 1 often have no previous terminated instance."""
+    client = RecordingClusterClient(logs="", current=REAL_BUG_TRACEBACK, workload_name="payments")
+    diagnosis = diagnose(
+        _real_bug_live_pod(include_traceback_in_args=False),
+        client=client,
+        reason="CrashLoopBackOff",
+    )
+    assert "traceback (most recent call last)" in diagnosis.compressed_logs.lower()
+    assert classify_failure(diagnosis) == Action.ESCALATE
+
+
+def test_diagnose_uses_pod_body_when_log_apis_are_empty() -> None:
+    """Live kind path: previous_logs is empty, traceback is on the container args."""
+    diagnosis = diagnose(
+        _real_bug_live_pod(),
+        client=NullClusterClient(),
+        reason="CrashLoopBackOff",
+    )
+    assert "traceback (most recent call last)" in diagnosis.compressed_logs.lower()
+    assert classify_failure(diagnosis) == Action.ESCALATE
+
+
+def test_diagnose_logs_retrieved_evidence_at_debug(
+    caplog: logging.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.DEBUG, logger="impactgate.controller")
+    diagnose(
+        _real_bug_live_pod(),
+        client=RecordingClusterClient(logs="", current=REAL_BUG_TRACEBACK),
+        reason="CrashLoopBackOff",
+    )
+    messages = [rec.message for rec in caplog.records if rec.levelno == logging.DEBUG]
+    assert any("previous_empty=True" in msg for msg in messages)
+    assert any("Traceback (most recent call last)" in msg for msg in messages)
+
+
+def test_real_bug_live_pod_escalates_with_empty_previous_logs() -> None:
+    """Repro: CrashLoopBackOff + empty previous_logs must not default to restart."""
+    client = RecordingClusterClient(
+        workload_name="payments",
+        logs="",
+        current=REAL_BUG_TRACEBACK,
+        revisions=[_healthy_revision("payments-healthy")],
+    )
+    action = handle_failure(
+        _real_bug_live_pod(include_traceback_in_args=False),
+        reason="CrashLoopBackOff",
+        client=client,
+        debouncer=Debouncer(threshold=1),
+        policy=default_policy(),
+        now=NOW,
+    )
+    assert action == Action.ESCALATE
+    assert client.restarts == []
+    assert client.audits[0].classification == Action.ESCALATE
+
+
+def test_crashloop_without_traceback_still_restarts() -> None:
+    client = RecordingClusterClient(logs="", current="", workload_name="payments")
+    diagnosis = diagnose(
+        _real_bug_live_pod(include_traceback_in_args=False),
+        client=client,
+        reason="CrashLoopBackOff",
+    )
+    assert classify_failure(diagnosis) == Action.RESTART
+
+
+def test_workload_from_pod_strips_replicaset_hash() -> None:
+    assert workload_from_pod(_real_bug_live_pod()) == "payments"
+
+
+def test_extract_runtime_evidence_includes_command_args() -> None:
+    evidence = extract_runtime_evidence(_real_bug_live_pod())
+    assert "Traceback (most recent call last)" in evidence
+    assert "exitCode: 1" in evidence
+
+
+def test_kubernetes_client_log_methods_delegate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[bool] = []
+
+    def fake_read(namespace: str, name: str, *, previous: bool) -> str:
+        del namespace, name
+        seen.append(previous)
+        return "Traceback (most recent call last):" if not previous else ""
+
+    monkeypatch.setattr("impactgate.controller.watcher.read_pod_logs", fake_read)
+    client = KubernetesClusterClient()
+    assert client.previous_logs("demo", "payments-x") == ""
+    assert client.current_logs("demo", "payments-x") == "Traceback (most recent call last):"
+    assert seen == [True, False]
 
 
 def test_oom_bumps_memory_when_allowed() -> None:

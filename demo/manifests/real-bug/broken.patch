@@ -1,6 +1,6 @@
 --- demo/manifests/real-bug/deployment.yaml
 +++ demo/manifests/real-bug/deployment.yaml
-@@ -17,4 +17,6 @@ spec:
+@@ -19,4 +19,6 @@ spec:
        containers:
          - name: payments
            image: nginx:1.25
