@@ -13,7 +13,8 @@ from impactgate.config import load_settings
 from impactgate.graph.builder import build_graph
 from impactgate.graph.diff import changed_files_between
 from impactgate.graph.parser import ParseResult, parse_directory
-from impactgate.models import GateDecision
+from impactgate.llm import build_provider, explain_findings
+from impactgate.models import GateDecision, Verdict
 from impactgate.report.markdown import render_report
 from impactgate.scanners import run_all_scanners
 
@@ -55,12 +56,12 @@ def analyze(
     ),
 ) -> None:
     """Analyze a directory of Kubernetes manifests and print a report."""
-    load_settings(repo_root=path, no_cache=no_cache)
-    decision = asyncio.run(_analyze(path, before))
+    settings = load_settings(repo_root=path, no_cache=no_cache)
+    decision = asyncio.run(_analyze(path, before, settings.llm_provider))
     typer.echo(render_report(decision), nl=False)
 
 
-async def _analyze(after_dir: Path, before_dir: Path | None) -> GateDecision:
+async def _analyze(after_dir: Path, before_dir: Path | None, llm_provider: str) -> GateDecision:
     after_parsed = parse_directory(after_dir)
     if not after_parsed.ok:
         return _human_review(after_parsed)
@@ -75,7 +76,22 @@ async def _analyze(after_dir: Path, before_dir: Path | None) -> GateDecision:
     result = compute_impact(before_graph, after_graph, files)
     scanner_findings = await run_all_scanners(_scan_targets(after_dir, files))
     merged = result.model_copy(update={"findings": [*result.findings, *scanner_findings]})
-    return to_gate_decision(merged)
+    decision = to_gate_decision(merged)
+    if not merged.findings:
+        return decision
+    verdicts = await explain_findings(merged.findings, provider=build_provider(llm_provider))
+    return _with_verdicts(decision, verdicts)
+
+
+def _with_verdicts(decision: GateDecision, verdicts: list[Verdict]) -> GateDecision:
+    ranks = {"low": 0, "medium": 1, "high": 2, "critical": 3}
+    highest = max((ranks[item.severity.value] for item in verdicts), default=0)
+    risk = decision.risk
+    if highest >= 2:
+        risk = "high"
+    elif highest == 1:
+        risk = "medium"
+    return decision.model_copy(update={"verdicts": verdicts, "risk": risk})
 
 
 def _scan_targets(after_dir: Path, changed: list[str]) -> list[Path]:
