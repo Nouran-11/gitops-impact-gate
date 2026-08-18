@@ -40,6 +40,10 @@ src = ["src", "tests"]
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP"]
 
+[tool.ruff.lint.isort]
+known-first-party = ["impactgate"]
+known-local-folder = ["tests", "helpers"]
+
 [tool.mypy]
 python_version = "3.12"
 strict = true
