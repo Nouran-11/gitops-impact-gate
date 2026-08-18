@@ -1,2 +1,8 @@
-# Placeholder: this scenario starts healthy, then crashes from an application bug.
-# The controller must escalate rather than remediate.
+--- demo/manifests/real-bug/deployment.yaml
++++ demo/manifests/real-bug/deployment.yaml
+@@ -17,4 +17,6 @@ spec:
+       containers:
+         - name: payments
+           image: nginx:1.25
++          command: ["/bin/sh", "-c"]
++          args: ["echo 'Traceback (most recent call last):'; echo 'ValueError: boom'; exit 1"]

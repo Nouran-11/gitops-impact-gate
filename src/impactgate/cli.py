@@ -2,13 +2,24 @@
 
 from __future__ import annotations
 
+import asyncio
+import time
 from pathlib import Path
 
+import networkx as nx
 import typer
 
+from impactgate.analysis.impact import ImpactResult, compute_impact, to_gate_decision
+from impactgate.cache.store import CacheStats, CacheStore, parse_directory_cached
 from impactgate.config import load_settings
-from impactgate.models import GateDecision
+from impactgate.graph.builder import build_graph
+from impactgate.graph.diff import changed_files_between
+from impactgate.graph.parser import ParseResult, parse_directory
+from impactgate.llm import Provider, build_provider, explain_findings
+from impactgate.metrics import REGISTRY
+from impactgate.models import Finding, GateDecision, Verdict
 from impactgate.report.markdown import render_report
+from impactgate.scanners import run_all_scanners
 
 app = typer.Typer(
     name="impactgate",
@@ -30,7 +41,16 @@ def analyze(
         file_okay=False,
         dir_okay=True,
         readable=True,
-        help="Directory of Kubernetes manifests to analyze.",
+        help="Directory of Kubernetes manifests to analyze (the after snapshot).",
+    ),
+    before: Path | None = typer.Option(
+        None,
+        "--before",
+        exists=True,
+        file_okay=False,
+        dir_okay=True,
+        readable=True,
+        help="Optional before snapshot. Findings that already exist here are ignored.",
     ),
     no_cache: bool = typer.Option(
         False,
@@ -39,9 +59,118 @@ def analyze(
     ),
 ) -> None:
     """Analyze a directory of Kubernetes manifests and print a report."""
-    load_settings(repo_root=path, no_cache=no_cache)
-    decision = GateDecision(risk="low", verdicts=[], reason="no findings")
-    typer.echo(render_report(decision), nl=False)
+    settings = load_settings(repo_root=path, no_cache=no_cache)
+    cache_root = Path(settings.cache_dir)
+    if not cache_root.is_absolute():
+        cache_root = path / cache_root
+    cache = CacheStore(cache_root, enabled=not settings.no_cache)
+    decision = asyncio.run(run_analysis(path, before, settings.llm_provider, cache=cache))
+    typer.echo(render_report(decision, cache_stats=cache.stats), nl=False)
+
+
+async def run_analysis(
+    after_dir: Path,
+    before_dir: Path | None,
+    llm_provider: str,
+    *,
+    cache: CacheStore | None = None,
+    provider: Provider | None = None,
+) -> GateDecision:
+    started = time.perf_counter()
+    try:
+        decision = await _run_analysis(
+            after_dir,
+            before_dir,
+            llm_provider,
+            cache=cache,
+            provider=provider,
+        )
+    finally:
+        REGISTRY.record_analysis(time.perf_counter() - started)
+    return decision
+
+
+async def _run_analysis(
+    after_dir: Path,
+    before_dir: Path | None,
+    llm_provider: str,
+    *,
+    cache: CacheStore | None = None,
+    provider: Provider | None = None,
+) -> GateDecision:
+    if cache is not None:
+        cache.stats = CacheStats()
+    if cache is not None:
+        after_parsed = parse_directory_cached(after_dir, cache)
+    else:
+        after_parsed = parse_directory(after_dir)
+    if not after_parsed.ok:
+        if cache is not None:
+            cache.stats.uncacheable = True
+        return _observe(_human_review(after_parsed))
+    if before_dir is not None:
+        if cache is not None:
+            before_parsed = parse_directory_cached(before_dir, cache)
+        else:
+            before_parsed = parse_directory(before_dir)
+    else:
+        before_parsed = ParseResult()
+    if before_dir is not None and not before_parsed.ok:
+        if cache is not None:
+            cache.stats.uncacheable = True
+        return _observe(_human_review(before_parsed))
+    after_graph = build_graph(after_parsed.resources)
+    before_graph: nx.DiGraph[str] = (
+        build_graph(before_parsed.resources) if before_dir is not None else nx.DiGraph()
+    )
+    files = changed_files_between(before_dir, after_dir)
+    result = compute_impact(before_graph, after_graph, files)
+    if result.uncacheable and cache is not None:
+        cache.stats.uncacheable = True
+    scanner_findings = await run_all_scanners(_scan_targets(after_dir, files), cache=cache)
+    merged = result.model_copy(update={"findings": [*result.findings, *scanner_findings]})
+    decision = to_gate_decision(merged)
+    if not merged.findings:
+        return _observe(decision)
+    llm = provider if provider is not None else build_provider(llm_provider)
+    verdicts = await explain_findings(merged.findings, provider=llm, cache=cache)
+    return _observe(_with_verdicts(decision, verdicts), merged.findings)
+
+
+def _observe(decision: GateDecision, findings: list[Finding] | None = None) -> GateDecision:
+    for item in findings or []:
+        REGISTRY.record_finding(item.rule, item.severity_floor.value, item.origin)
+    REGISTRY.record_gate(decision.risk)
+    return decision
+
+
+def _with_verdicts(decision: GateDecision, verdicts: list[Verdict]) -> GateDecision:
+    ranks = {"low": 0, "medium": 1, "high": 2, "critical": 3}
+    highest = max((ranks[item.severity.value] for item in verdicts), default=0)
+    risk = decision.risk
+    if highest >= 2:
+        risk = "high"
+    elif highest == 1:
+        risk = "medium"
+    return decision.model_copy(update={"verdicts": verdicts, "risk": risk})
+
+
+def _scan_targets(after_dir: Path, changed: list[str]) -> list[Path]:
+    targets: list[Path] = []
+    for name in changed:
+        path = after_dir / name
+        if path.is_file() and path.suffix.lower() in {".yaml", ".yml"}:
+            targets.append(path)
+    return targets
+
+
+def _human_review(parsed: ParseResult) -> GateDecision:
+    errors = [
+        f"{item.source_file}:{item.source_line or '?'}: {item.message}" for item in parsed.errors
+    ]
+    return to_gate_decision(
+        ImpactResult(findings=[], changed_nodes=[], needs_human_review=True, parse_errors=errors)
+    )
 
 
 def main() -> None:
