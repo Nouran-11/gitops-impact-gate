@@ -245,7 +245,7 @@ def read_pod_logs(namespace: str, name: str, *, previous: bool) -> str:
     """Fetch container logs. Empty is normal when a container exits instead of crashing."""
     for reader in (_logs_via_kubernetes, _logs_via_incluster, _logs_via_kubectl):
         try:
-            text = reader(namespace, name, previous=previous)
+            text = _decode_log_text(reader(namespace, name, previous=previous))
         except Exception:
             LOGGER.debug(
                 "log reader %s failed for %s/%s",
@@ -258,6 +258,17 @@ def read_pod_logs(namespace: str, name: str, *, previous: bool) -> str:
         if text.strip():
             return text
     return ""
+
+
+def _decode_log_text(raw: object) -> str:
+    """Normalize log payloads to str. The official client often returns bytes."""
+    if raw is None:
+        return ""
+    if isinstance(raw, str):
+        return raw
+    if isinstance(raw, (bytes, bytearray, memoryview)):
+        return bytes(raw).decode("utf-8", errors="replace")
+    return str(raw)
 
 
 def _logs_via_kubernetes(namespace: str, name: str, *, previous: bool) -> str:
@@ -275,7 +286,7 @@ def _logs_via_kubernetes(namespace: str, name: str, *, previous: bool) -> str:
         timestamps=False,
         tail_lines=400,
     )
-    return text if isinstance(text, str) else ""
+    return _decode_log_text(text)
 
 
 def _logs_via_incluster(namespace: str, name: str, *, previous: bool) -> str:
@@ -300,7 +311,7 @@ def _logs_via_incluster(namespace: str, name: str, *, previous: bool) -> str:
             params=params,
         )
     if response.status_code == 200:
-        return response.text
+        return _decode_log_text(response.text)
     return ""
 
 
@@ -318,7 +329,7 @@ def _logs_via_kubectl(namespace: str, name: str, *, previous: bool) -> str:
         cmd.append("--previous")
     completed = subprocess.run(cmd, capture_output=True, text=True, timeout=10, check=False)
     if completed.returncode == 0:
-        return completed.stdout or ""
+        return _decode_log_text(completed.stdout or "")
     return ""
 
 
