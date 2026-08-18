@@ -12,6 +12,7 @@ from impactgate.cache.store import CacheStore
 from impactgate.llm.prompts import PROMPT_VERSION, STRICT_RETRY, render_prompt
 from impactgate.llm.provider import FakeProvider, Provider, ProviderError, build_provider
 from impactgate.llm.schema import ModelBatch, ModelVerdict
+from impactgate.metrics import REGISTRY
 from impactgate.models import Finding, Verdict
 
 LOGGER = logging.getLogger("impactgate.llm")
@@ -42,6 +43,7 @@ async def explain_findings(
         if hit is not None:
             if cache is not None:
                 cache.stats.llm_calls_saved += 1
+            REGISTRY.record_llm(getattr(active, "name", "unknown"), cached=True)
             cached_verdicts[finding.id] = hit
         else:
             pending.append(finding)
@@ -50,6 +52,7 @@ async def explain_findings(
     for batch in grouped:
         if cache is not None:
             cache.stats.llm_calls_made += 1
+        REGISTRY.record_llm(getattr(active, "name", "unknown"), cached=False)
         fresh.extend(
             await _explain_batch(batch, active, diffs=diffs, environment=environment)
         )

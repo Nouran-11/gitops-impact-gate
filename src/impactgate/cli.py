@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from pathlib import Path
 
 import networkx as nx
@@ -15,7 +16,8 @@ from impactgate.graph.builder import build_graph
 from impactgate.graph.diff import changed_files_between
 from impactgate.graph.parser import ParseResult, parse_directory
 from impactgate.llm import Provider, build_provider, explain_findings
-from impactgate.models import GateDecision, Verdict
+from impactgate.metrics import REGISTRY
+from impactgate.models import Finding, GateDecision, Verdict
 from impactgate.report.markdown import render_report
 from impactgate.scanners import run_all_scanners
 
@@ -74,6 +76,28 @@ async def run_analysis(
     cache: CacheStore | None = None,
     provider: Provider | None = None,
 ) -> GateDecision:
+    started = time.perf_counter()
+    try:
+        decision = await _run_analysis(
+            after_dir,
+            before_dir,
+            llm_provider,
+            cache=cache,
+            provider=provider,
+        )
+    finally:
+        REGISTRY.record_analysis(time.perf_counter() - started)
+    return decision
+
+
+async def _run_analysis(
+    after_dir: Path,
+    before_dir: Path | None,
+    llm_provider: str,
+    *,
+    cache: CacheStore | None = None,
+    provider: Provider | None = None,
+) -> GateDecision:
     if cache is not None:
         cache.stats = CacheStats()
     if cache is not None:
@@ -83,7 +107,7 @@ async def run_analysis(
     if not after_parsed.ok:
         if cache is not None:
             cache.stats.uncacheable = True
-        return _human_review(after_parsed)
+        return _observe(_human_review(after_parsed))
     if before_dir is not None:
         if cache is not None:
             before_parsed = parse_directory_cached(before_dir, cache)
@@ -94,7 +118,7 @@ async def run_analysis(
     if before_dir is not None and not before_parsed.ok:
         if cache is not None:
             cache.stats.uncacheable = True
-        return _human_review(before_parsed)
+        return _observe(_human_review(before_parsed))
     after_graph = build_graph(after_parsed.resources)
     before_graph: nx.DiGraph[str] = (
         build_graph(before_parsed.resources) if before_dir is not None else nx.DiGraph()
@@ -107,10 +131,17 @@ async def run_analysis(
     merged = result.model_copy(update={"findings": [*result.findings, *scanner_findings]})
     decision = to_gate_decision(merged)
     if not merged.findings:
-        return decision
+        return _observe(decision)
     llm = provider if provider is not None else build_provider(llm_provider)
     verdicts = await explain_findings(merged.findings, provider=llm, cache=cache)
-    return _with_verdicts(decision, verdicts)
+    return _observe(_with_verdicts(decision, verdicts), merged.findings)
+
+
+def _observe(decision: GateDecision, findings: list[Finding] | None = None) -> GateDecision:
+    for item in findings or []:
+        REGISTRY.record_finding(item.rule, item.severity_floor.value, item.origin)
+    REGISTRY.record_gate(decision.risk)
+    return decision
 
 
 def _with_verdicts(decision: GateDecision, verdicts: list[Verdict]) -> GateDecision:

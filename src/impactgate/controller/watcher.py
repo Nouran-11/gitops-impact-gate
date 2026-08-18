@@ -20,6 +20,7 @@ from impactgate.controller.actions import (
     execute_action,
 )
 from impactgate.controller.policy import RemediationPolicy, default_policy
+from impactgate.metrics import REGISTRY
 
 LOGGER = logging.getLogger("impactgate.controller")
 MANAGED_LABEL = "impactgate.io/managed"
@@ -196,6 +197,7 @@ def handle_failure(
         return None
     diagnosis = diagnose(pod, client=client, reason=reason)
     key = f"{diagnosis.namespace}/{diagnosis.workload}"
+    REGISTRY.note_detection(key, at=now)
     if not debouncer.record(key, at=now):
         logger.info("debouncing %s after %s", key, reason)
         return None
@@ -213,6 +215,30 @@ def handle_failure(
     # Dry-run reports the classified action (what we would do). Enforce returns
     # the action after guardrails, which may be ESCALATE.
     return record.classification if record.dry_run else record.action
+
+
+def is_pod_ready(pod: Mapping[str, Any]) -> bool:
+    status_obj = pod.get("status")
+    status = status_obj if isinstance(status_obj, dict) else {}
+    containers = _as_list(status.get("containerStatuses"))
+    if not containers:
+        return False
+    return all(isinstance(item, dict) and item.get("ready") is True for item in containers)
+
+
+def maybe_record_recovery(
+    pod: Mapping[str, Any],
+    *,
+    client: ClusterClient,
+    now: datetime | None = None,
+) -> float | None:
+    """Stop the MTTR timer once every container on a managed pod is ready."""
+    if not is_managed(pod) or not is_pod_ready(pod):
+        return None
+    metadata = pod.get("metadata") or {}
+    namespace = str(metadata.get("namespace") or "default")
+    workload = client.owning_workload(namespace, pod)
+    return REGISTRY.note_recovery(f"{namespace}/{workload}", at=now)
 
 
 def _as_list(value: object) -> list[Any]:
@@ -233,15 +259,16 @@ def _register_kopf() -> None:
 
     @kopf.on.event("", "v1", "pods")
     def on_pod_event(body: Mapping[str, Any], **_: object) -> None:
-        reason = extract_waiting_reason(body)
-        if reason is None:
-            return
         client = state["client"]
         debouncer = state["debouncer"]
         breaker = state["breaker"]
         assert isinstance(client, NullClusterClient)
         assert isinstance(debouncer, Debouncer)
         assert isinstance(breaker, CircuitBreaker)
+        reason = extract_waiting_reason(body)
+        if reason is None:
+            maybe_record_recovery(body, client=client)
+            return
         handle_failure(
             body,
             reason=reason,

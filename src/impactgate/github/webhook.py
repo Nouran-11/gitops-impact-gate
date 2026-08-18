@@ -40,6 +40,12 @@ def create_app(
     github = poster if poster is not None else GitHubPoster()
     app = FastAPI(title="Impact Gate")
 
+    @app.get("/metrics")
+    def metrics() -> Response:
+        from impactgate.metrics import REGISTRY
+
+        return Response(content=REGISTRY.render(), media_type="text/plain; version=0.0.4")
+
     @app.post("/webhook")
     async def webhook(request: Request, background: BackgroundTasks) -> Response:
         body = await request.body()
