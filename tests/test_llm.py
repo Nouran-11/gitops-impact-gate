@@ -182,6 +182,31 @@ def test_group_packs_unique_rules_into_batches_of_ten() -> None:
     assert BATCH_SIZE == 10
 
 
+def test_scanner_finding_never_carries_graph_explanation() -> None:
+    graph = _finding()
+    scanner = Finding(
+        id=compute_finding_id("KSV-0014", "_cluster/Kubernetes/deployment", "ro"),
+        origin="scanner",
+        rule="KSV-0014",
+        resource=ResourceRef(api_version="v1", kind="Kubernetes", name="deployment"),
+        path=["_cluster/Kubernetes/deployment"],
+        evidence=(
+            "deployment.yaml: Root file system is not read-only. "
+            "Remediation: set readOnlyRootFilesystem."
+        ),
+        severity_floor=Severity.HIGH,
+    )
+    provider = FakeProvider()
+    verdicts = asyncio.run(explain_findings([graph, scanner], provider=provider))
+    assert needs_llm(scanner) is False
+    assert len(provider.calls) == 1
+    by_rule = {item.rule: item for item in verdicts}
+    assert by_rule["KSV-0014"].explanation == scanner.evidence
+    assert "selector matches no pods" not in by_rule["KSV-0014"].explanation
+    assert by_rule["KSV-0014"].origin == "scanner"
+    assert "broken-selector" in by_rule["broken-selector"].explanation
+
+
 def test_style_scanner_findings_skip_llm() -> None:
     graph = _finding()
     scanner = Finding(
@@ -246,7 +271,7 @@ def test_severity_floor_is_per_finding() -> None:
     assert by_rule["unset-cpu-requirements"].severity == Severity.LOW
 
 
-def test_scanner_llm_patch_is_dropped_and_guidance_kept() -> None:
+def test_high_scanner_findings_skip_llm_and_keep_scanner_text() -> None:
     finding = Finding(
         id="scanner-high",
         origin="scanner",
@@ -258,22 +283,31 @@ def test_scanner_llm_patch_is_dropped_and_guidance_kept() -> None:
         evidence="Guideline: set seccompProfile to RuntimeDefault",
         severity_floor=Severity.HIGH,
     )
-    payload = {
-        "verdicts": [
-            {
-                "finding_id": finding.id,
-                "severity": "high",
-                "explanation": "The container can run with a weak sandbox.",
-                "suggested_fix": "seccompProfile:\n  type: Unconfined",
-                "confidence": 0.99,
-            }
+    provider = FakeProvider(
+        responses=[
+            json.dumps(
+                {
+                    "verdicts": [
+                        {
+                            "finding_id": finding.id,
+                            "severity": "high",
+                            "explanation": (
+                                "KSV-0014: the Service selector matches no pods, "
+                                "so traffic through the Ingress stops reaching the workload."
+                            ),
+                            "suggested_fix": "seccompProfile:\n  type: Unconfined",
+                            "confidence": 0.99,
+                        }
+                    ]
+                }
+            )
         ]
-    }
-    provider = FakeProvider(responses=[json.dumps(payload)])
+    )
     verdicts = asyncio.run(explain_findings([finding], provider=provider))
+    assert provider.calls == []
     assert verdicts[0].suggested_fix is None
-    assert "Unconfined" not in (verdicts[0].suggested_fix or "")
-    assert "Guideline: set seccompProfile to RuntimeDefault" in verdicts[0].explanation
+    assert verdicts[0].explanation == finding.evidence
+    assert "selector matches no pods" not in verdicts[0].explanation
 
 
 def test_low_confidence_graph_patch_is_dropped() -> None:

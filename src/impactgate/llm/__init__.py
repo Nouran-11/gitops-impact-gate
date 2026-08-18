@@ -139,18 +139,18 @@ def _match_verdicts(findings: Sequence[Finding], parsed: Sequence[ModelVerdict])
     remaining = list(parsed)
     result: list[Verdict] = []
     for finding in findings:
+        if finding.origin == "scanner":
+            result.append(_verbatim_verdict(finding))
+            continue
         match = _take_match(remaining, finding.id)
         if match is None:
             result.append(_degraded(finding))
             continue
-        explanation = match.explanation
-        if finding.origin == "scanner" and finding.evidence and finding.evidence not in explanation:
-            explanation = f"{explanation}\n\n{finding.evidence}"
         result.append(
             _verdict(
                 finding,
                 severity=raise_only(finding.severity_floor, match.severity),
-                explanation=explanation,
+                explanation=match.explanation,
                 suggested_fix=accepted_suggested_fix(
                     finding.origin, match.suggested_fix, match.confidence
                 ),
@@ -221,19 +221,8 @@ def _with_finding_meta(verdict: Verdict, finding: Finding) -> Verdict:
 
 
 def needs_llm(finding: Finding) -> bool:
-    """Graph findings always; scanner findings only at or above the severity threshold."""
-    if finding.origin == "graph":
-        return True
-    return _severity_rank(finding.severity_floor) >= _severity_rank(SCANNER_LLM_MIN_SEVERITY)
-
-
-def _severity_rank(severity: Severity) -> int:
-    return {
-        Severity.LOW: 0,
-        Severity.MEDIUM: 1,
-        Severity.HIGH: 2,
-        Severity.CRITICAL: 3,
-    }[severity]
+    """Only graph findings. Scanners already ship remediation text."""
+    return finding.origin == "graph"
 
 
 def _group(findings: Sequence[Finding]) -> list[list[Finding]]:

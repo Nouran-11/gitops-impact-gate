@@ -126,8 +126,8 @@ def test_cli_service_matches_pod_labels_not_match_labels(
     monkeypatch.setattr("impactgate.cli.run_all_scanners", fake_scanners)
     result = runner.invoke(app, ["analyze", str(matching), "--no-cache"])
     assert result.exit_code == 0, result.output
-    assert "## Relationship findings" not in result.output
     assert "broken-selector" not in result.output
+    assert "mismatching-selector" in result.output
 
 
 def test_cli_selector_break_after_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -167,16 +167,8 @@ def test_cli_selector_break_after_dir(tmp_path: Path, monkeypatch: pytest.Monkey
     assert "demo/Ingress/public" in result.output
     assert "critical" in result.output
     assert "## Relationship findings" in result.output
-    assert "## Scanner findings" in result.output
-    assert result.output.index("## Relationship findings") < result.output.index(
-        "## Scanner findings"
-    )
-    assert result.output.index("broken-selector") < result.output.index("unset-cpu-requirements")
-    assert "unset-cpu-requirements" in result.output
-    rel = result.output.split("## Scanner findings", 1)[0]
-    assert "critical" in rel
-    scan = result.output.split("## Scanner findings", 1)[1]
-    assert "### high:" not in scan
+    assert "## Scanner findings" not in result.output
+    assert "unset-cpu-requirements" not in result.output
     mermaid = result.output.split("```mermaid", 1)[1].split("```", 1)[0]
     assert "-->" in mermaid
     assert "demo/Ingress/public" in mermaid
@@ -240,6 +232,111 @@ def test_cli_merges_scanner_findings(tmp_path: Path, monkeypatch: pytest.MonkeyP
     assert "## Impact graph" not in result.output
     assert "no impact" not in result.output
     assert "```suggestion" not in result.output
+
+
+def test_cli_before_drops_identical_scanner_findings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = Path(__file__).resolve().parents[1] / "demo" / "manifests" / "selector-break"
+    before_dir = tmp_path / "before"
+    after_dir = tmp_path / "after"
+    _copy_yaml_dir(root, before_dir)
+    _copy_yaml_dir(root, after_dir)
+    _set_pod_template_app(after_dir / "deployment.yaml", "checkout-v2")
+
+    scanner_findings = [
+        Finding(
+            id=compute_finding_id("KSV-0014", "_cluster/Kubernetes/deployment", "ro"),
+            origin="scanner",
+            rule="KSV-0014",
+            resource=ResourceRef(api_version="v1", kind="Kubernetes", name="deployment"),
+            path=["_cluster/Kubernetes/deployment"],
+            evidence=(
+                "deployment.yaml: Root file system is not read-only. "
+                "Remediation: set readOnlyRootFilesystem."
+            ),
+            severity_floor=Severity.HIGH,
+        ),
+        Finding(
+            id=compute_finding_id("KSV-0118", "_cluster/Kubernetes/deployment", "seccomp"),
+            origin="scanner",
+            rule="KSV-0118",
+            resource=ResourceRef(api_version="v1", kind="Kubernetes", name="deployment"),
+            path=["_cluster/Kubernetes/deployment"],
+            evidence="deployment.yaml: seccomp profile is not set",
+            severity_floor=Severity.HIGH,
+        ),
+        Finding(
+            id=compute_finding_id("unset-cpu-requirements", "demo/Deployment/checkout", "cpu"),
+            origin="scanner",
+            rule="unset-cpu-requirements",
+            resource=ResourceRef(
+                api_version="apps/v1", kind="Deployment", name="checkout", namespace="demo"
+            ),
+            path=["demo/Deployment/checkout"],
+            evidence="deployment.yaml: container is missing cpu requests",
+            severity_floor=Severity.LOW,
+        ),
+    ]
+
+    async def fake_scanners(_files: object, **_kwargs: object) -> list[Finding]:
+        return list(scanner_findings)
+
+    monkeypatch.setattr("impactgate.cli.run_all_scanners", fake_scanners)
+    result = runner.invoke(
+        app, ["analyze", str(after_dir), "--before", str(before_dir), "--no-cache"]
+    )
+    assert result.exit_code == 0, result.output
+    assert "## Scanner findings" not in result.output
+    assert "KSV-0014" not in result.output
+    assert "KSV-0118" not in result.output
+    assert "unset-cpu-requirements" not in result.output
+    assert "## Relationship findings" in result.output
+    relationship = result.output.split("## Relationship findings", 1)[1]
+    assert "broken-selector" in relationship
+    scanner_rules = {"KSV-0014", "KSV-0118", "unset-cpu-requirements"}
+    headings = [line for line in relationship.splitlines() if line.startswith("### ")]
+    for line in headings:
+        assert not any(rule in line for rule in scanner_rules)
+    allowed = {"broken-selector", "unreachable-workload", "mismatching-selector"}
+    found_rules = {line.split("`")[1] for line in headings if "`" in line}
+    assert found_rules <= allowed
+    assert found_rules
+
+
+def test_cli_scanner_keeps_own_text_not_graph_explanation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = Path(__file__).resolve().parents[1] / "demo" / "manifests" / "selector-break"
+    after_dir = tmp_path / "after"
+    _copy_yaml_dir(root, after_dir)
+    _set_pod_template_app(after_dir / "deployment.yaml", "checkout-v2")
+    evidence = (
+        "deployment.yaml: Root file system is not read-only. "
+        "Remediation: Set 'readOnlyRootFilesystem' to true."
+    )
+    scanner_finding = Finding(
+        id=compute_finding_id("KSV-0014", "_cluster/Kubernetes/deployment", "ro"),
+        origin="scanner",
+        rule="KSV-0014",
+        resource=ResourceRef(api_version="v1", kind="Kubernetes", name="deployment"),
+        path=["_cluster/Kubernetes/deployment"],
+        evidence=evidence,
+        severity_floor=Severity.HIGH,
+    )
+
+    async def fake_scanners(_files: object, **_kwargs: object) -> list[Finding]:
+        return [scanner_finding]
+
+    monkeypatch.setattr("impactgate.cli.run_all_scanners", fake_scanners)
+    result = runner.invoke(app, ["analyze", str(after_dir), "--no-cache"])
+    assert result.exit_code == 0, result.output
+    assert "## Scanner findings" in result.output
+    scan = result.output.split("## Scanner findings", 1)[1]
+    assert "KSV-0014" in scan
+    assert evidence in scan
+    assert "selector matches no pods" not in scan
+    assert "_cluster/Kubernetes/deployment" not in scan.split(evidence, 1)[0]
 
 
 def _copy_yaml_dir(src: Path, dest: Path) -> None:

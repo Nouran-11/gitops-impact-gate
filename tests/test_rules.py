@@ -3,10 +3,13 @@ from __future__ import annotations
 from impactgate.analysis.rules import (
     broken_selector,
     dangling_reference,
+    drop_preexisting,
+    mismatching_selector,
     orphaned_ingress,
     run_integrity_checks,
     unreachable_workload,
 )
+from impactgate.models import Finding, ResourceRef, Severity, compute_finding_id
 
 from tests.helpers import graph_from_yaml, resources_from_yaml, selector_break_graphs
 
@@ -82,6 +85,63 @@ def test_broken_selector_positive() -> None:
 
 def test_broken_selector_negative() -> None:
     assert broken_selector(graph_from_yaml(MATCHING)) == []
+
+
+def test_mismatching_selector_positive() -> None:
+    findings = mismatching_selector(
+        graph_from_yaml(
+            """
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: checkout, namespace: demo}
+spec:
+  selector: {matchLabels: {app: checkout}}
+  template:
+    metadata: {labels: {app: checkout-v2}}
+    spec:
+      containers: [{name: app, image: nginx:1.25}]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: checkout, namespace: demo}
+spec:
+  selector: {app: checkout}
+"""
+        )
+    )
+    assert len(findings) == 1
+    assert findings[0].rule == "mismatching-selector"
+    assert findings[0].resource.key() == "demo/Deployment/checkout"
+    assert "checkout-v2" in findings[0].evidence
+
+
+def test_mismatching_selector_negative() -> None:
+    assert mismatching_selector(graph_from_yaml(MATCHING)) == []
+
+
+def test_drop_preexisting_by_rule_and_resource() -> None:
+    ref = ResourceRef(api_version="v1", kind="File", name="deployment.yaml")
+    shared = Finding(
+        id=compute_finding_id("KSV-0014", ref.key(), "ro"),
+        origin="scanner",
+        rule="KSV-0014",
+        resource=ref,
+        path=[ref.key()],
+        evidence="deployment.yaml: Root file system is not read-only",
+        severity_floor=Severity.HIGH,
+    )
+    extra = shared.model_copy(
+        update={
+            "id": compute_finding_id("broken-selector", "demo/Service/checkout", "x"),
+            "origin": "graph",
+            "rule": "broken-selector",
+            "resource": ResourceRef(
+                api_version="v1", kind="Service", name="checkout", namespace="demo"
+            ),
+        }
+    )
+    kept = drop_preexisting([shared, extra], [shared])
+    assert [item.rule for item in kept] == ["broken-selector"]
 
 
 def test_dangling_reference_positive() -> None:

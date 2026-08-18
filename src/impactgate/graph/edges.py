@@ -428,6 +428,17 @@ def service_selector(resource: Resource) -> dict[str, str] | None:
     return _as_str_map(spec.get("selector"))
 
 
+def workload_match_labels(resource: Resource) -> dict[str, str] | None:
+    """Deployment/StatefulSet/DaemonSet ``spec.selector.matchLabels``. Not pod labels."""
+    spec = k8s_spec(resource)
+    if spec is None:
+        return None
+    selector = spec.get("selector")
+    if not isinstance(selector, dict):
+        return None
+    return _as_str_map(selector.get("matchLabels"))
+
+
 def service_selects_workload(service: Resource, workload: Resource) -> bool:
     """True when the Service selector is a subset of the workload's pod labels."""
     if not _same_namespace(service, workload):
