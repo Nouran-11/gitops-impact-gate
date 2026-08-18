@@ -246,6 +246,63 @@ def test_severity_floor_is_per_finding() -> None:
     assert by_rule["unset-cpu-requirements"].severity == Severity.LOW
 
 
+def test_scanner_llm_patch_is_dropped_and_guidance_kept() -> None:
+    finding = Finding(
+        id="scanner-high",
+        origin="scanner",
+        rule="CKV_K8S_30",
+        resource=ResourceRef(
+            api_version="apps/v1", kind="Deployment", name="checkout", namespace="demo"
+        ),
+        path=["demo/Deployment/checkout"],
+        evidence="Guideline: set seccompProfile to RuntimeDefault",
+        severity_floor=Severity.HIGH,
+    )
+    payload = {
+        "verdicts": [
+            {
+                "finding_id": finding.id,
+                "severity": "high",
+                "explanation": "The container can run with a weak sandbox.",
+                "suggested_fix": "seccompProfile:\n  type: Unconfined",
+                "confidence": 0.99,
+            }
+        ]
+    }
+    provider = FakeProvider(responses=[json.dumps(payload)])
+    verdicts = asyncio.run(explain_findings([finding], provider=provider))
+    assert verdicts[0].suggested_fix is None
+    assert "Unconfined" not in (verdicts[0].suggested_fix or "")
+    assert "Guideline: set seccompProfile to RuntimeDefault" in verdicts[0].explanation
+
+
+def test_low_confidence_graph_patch_is_dropped() -> None:
+    finding = _finding()
+    payload = {
+        "verdicts": [
+            {
+                "finding_id": finding.id,
+                "severity": "critical",
+                "explanation": "Traffic will miss the pods.",
+                "suggested_fix": "spec:\n  selector:\n    app: checkout",
+                "confidence": 0.2,
+            }
+        ]
+    }
+    provider = FakeProvider(responses=[json.dumps(payload)])
+    verdicts = asyncio.run(explain_findings([finding], provider=provider))
+    assert verdicts[0].suggested_fix is None
+    assert verdicts[0].explanation == "Traffic will miss the pods."
+
+
+def test_prompt_forbids_insecure_scanner_patches() -> None:
+    from impactgate.llm.prompts import PROMPT_TEMPLATE
+
+    assert "wrong patch is worse than no patch" in PROMPT_TEMPLATE
+    assert "scanners ship their own remediation" in PROMPT_TEMPLATE
+    assert "seccompProfile: unconfined" in PROMPT_TEMPLATE
+
+
 def _numbered_finding(index: int) -> Finding:
     ref = ResourceRef(api_version="v1", kind="Service", name=f"svc-{index}", namespace="demo")
     evidence = f"finding {index}"

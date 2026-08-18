@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from impactgate.models import Finding, ResourceRef, Severity, compute_finding_id
-from impactgate.scanners.base import run_command
+from impactgate.scanners.base import run_command, with_guidance
 
 LOGGER = logging.getLogger("impactgate.scanners.trivy")
 
@@ -58,6 +58,7 @@ def _finding_from_misconfig(item: dict[str, Any], source: Path) -> Finding | Non
         return None
     title = item.get("Title")
     evidence = title if isinstance(title, str) else rule
+    evidence = with_guidance(evidence, _trivy_remediation(item))
     ref = ResourceRef(api_version="v1", kind="File", name=source.name)
     cause = item.get("CauseMetadata")
     if isinstance(cause, dict):
@@ -85,3 +86,11 @@ def _severity(value: object) -> Severity:
         "LOW": Severity.LOW,
     }
     return mapping.get(value.upper(), Severity.MEDIUM)
+
+
+def _trivy_remediation(item: dict[str, Any]) -> str | None:
+    for key in ("Resolution", "resolution"):
+        value = item.get(key)
+        if isinstance(value, str) and value.strip():
+            return f"Remediation: {value.strip()}"
+    return None

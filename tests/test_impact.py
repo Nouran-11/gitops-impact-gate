@@ -127,6 +127,34 @@ def test_cli_selector_break_after_dir(tmp_path: Path, monkeypatch: pytest.Monkey
     assert "File/checkout" not in mermaid
 
 
+def test_cli_selector_break_without_before_still_draws_graph(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    after_dir = tmp_path / "after"
+    root = Path(__file__).resolve().parents[1] / "demo" / "manifests" / "selector-break"
+    after_dir.mkdir()
+    for path in root.glob("*.yaml"):
+        (after_dir / path.name).write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
+    deployment = (after_dir / "deployment.yaml").read_text(encoding="utf-8")
+    (after_dir / "deployment.yaml").write_text(
+        _relabel_pod_template(deployment),
+        encoding="utf-8",
+    )
+
+    async def fake_scanners(_files: object, **_kwargs: object) -> list[Finding]:
+        return []
+
+    monkeypatch.setattr("impactgate.cli.run_all_scanners", fake_scanners)
+    result = runner.invoke(app, ["analyze", str(after_dir)])
+    assert result.exit_code == 0, result.output
+    assert "broken-selector" in result.output
+    assert "## Impact graph" in result.output
+    assert "no impact" not in result.output
+    mermaid = result.output.split("```mermaid", 1)[1].split("```", 1)[0]
+    assert "demo/Ingress/public" in mermaid
+    assert "demo/Service/checkout" in mermaid
+
+
 def test_cli_merges_scanner_findings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     (tmp_path / "cm.yaml").write_text(
         "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: ok\n  namespace: demo\n",
@@ -151,6 +179,9 @@ def test_cli_merges_scanner_findings(tmp_path: Path, monkeypatch: pytest.MonkeyP
     assert result.exit_code == 0, result.output
     assert "CKV_K8S_20" in result.output
     assert "**Risk:** high" in result.output
+    assert "## Impact graph" not in result.output
+    assert "no impact" not in result.output
+    assert "```suggestion" not in result.output
 
 
 def _relabel_pod_template(text: str) -> str:
