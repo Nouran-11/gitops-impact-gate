@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import logging
+import sys
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from types import ModuleType, SimpleNamespace
 from typing import Any
 
 import pytest
@@ -22,12 +24,17 @@ from impactgate.controller.watcher import (
     Debouncer,
     KubernetesClusterClient,
     NullClusterClient,
+    _decode_log_text,
+    _logs_via_incluster,
+    _logs_via_kubectl,
+    _logs_via_kubernetes,
     compress_logs,
     diagnose,
     extract_runtime_evidence,
     extract_waiting_reason,
     handle_failure,
     is_managed,
+    read_pod_logs,
     workload_from_pod,
 )
 
@@ -523,6 +530,76 @@ def test_kubernetes_client_log_methods_delegate(
     assert client.previous_logs("demo", "payments-x") == ""
     assert client.current_logs("demo", "payments-x") == "Traceback (most recent call last):"
     assert seen == [True, False]
+
+
+TRACEBACK_BYTES = b"Traceback (most recent call last):\nValueError: boom\n"
+TRACEBACK_TEXT = "Traceback (most recent call last):\nValueError: boom\n"
+
+
+def _install_fake_kubernetes(monkeypatch: pytest.MonkeyPatch, payload: object) -> None:
+    def load_incluster_config() -> None:
+        raise RuntimeError("no in-cluster config")
+
+    fake_api = SimpleNamespace(
+        read_namespaced_pod_log=lambda **_: payload,
+    )
+    fake_client = SimpleNamespace(CoreV1Api=lambda: fake_api)
+    fake_config = SimpleNamespace(
+        load_incluster_config=load_incluster_config,
+        load_kube_config=lambda: None,
+    )
+    fake_mod = ModuleType("kubernetes")
+    setattr(fake_mod, "client", fake_client)
+    setattr(fake_mod, "config", fake_config)
+    monkeypatch.setitem(sys.modules, "kubernetes", fake_mod)
+
+
+def test_decode_log_text_turns_bytes_into_str() -> None:
+    decoded = _decode_log_text(TRACEBACK_BYTES)
+    assert isinstance(decoded, str)
+    assert decoded == TRACEBACK_TEXT
+    assert decoded.startswith("Traceback")
+    assert "\n" in decoded
+    assert "b'" not in decoded
+
+
+def test_logs_via_kubernetes_decodes_bytes_to_str(monkeypatch: pytest.MonkeyPatch) -> None:
+    _install_fake_kubernetes(monkeypatch, TRACEBACK_BYTES)
+    text = _logs_via_kubernetes("demo", "payments-x", previous=False)
+    assert type(text) is str
+    assert text == TRACEBACK_TEXT
+    assert "\\n" not in text
+
+
+def test_log_readers_always_return_str(monkeypatch: pytest.MonkeyPatch) -> None:
+    _install_fake_kubernetes(monkeypatch, TRACEBACK_BYTES)
+    monkeypatch.delenv("KUBERNETES_SERVICE_HOST", raising=False)
+    monkeypatch.setattr(
+        "impactgate.controller.watcher.subprocess.run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout=TRACEBACK_BYTES),
+    )
+    readers = (_logs_via_kubernetes, _logs_via_incluster, _logs_via_kubectl)
+    for reader in readers:
+        result = reader("demo", "payments-x", previous=False)
+        assert type(result) is str, reader.__name__
+
+
+def test_read_pod_logs_decodes_bytes_from_first_reader(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_fake_kubernetes(monkeypatch, TRACEBACK_BYTES)
+    text = read_pod_logs("demo", "payments-x", previous=False)
+    assert type(text) is str
+    assert text == TRACEBACK_TEXT
+    diagnosis = diagnose(
+        _real_bug_live_pod(include_traceback_in_args=False),
+        client=KubernetesClusterClient(),
+        reason="CrashLoopBackOff",
+    )
+    assert type(diagnosis.compressed_logs) is str
+    assert "Traceback (most recent call last)" in diagnosis.compressed_logs
+    assert "b'" not in diagnosis.compressed_logs
+    assert classify_failure(diagnosis) == Action.ESCALATE
 
 
 def test_oom_bumps_memory_when_allowed() -> None:
