@@ -29,6 +29,12 @@ def test_internal_broken_selector_is_medium() -> None:
     )
 
 
+def test_scanner_style_rule_is_low_without_exposure() -> None:
+    assert (
+        severity_floor("unset-cpu-requirements", externally_exposed=False) == Severity.LOW
+    )
+
+
 def test_raise_only_never_lowers() -> None:
     assert raise_only(Severity.HIGH, Severity.LOW) == Severity.HIGH
     assert raise_only(Severity.MEDIUM, Severity.CRITICAL) == Severity.CRITICAL

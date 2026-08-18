@@ -74,6 +74,9 @@ class Verdict(BaseModel):
     explanation: str  # plain English, from LLM
     suggested_fix: str | None
     confidence: float
+    origin: Literal["graph", "scanner"] = "graph"
+    path: list[str] = Field(default_factory=list)
+    rule: str = ""
 
 
 class GateDecision(BaseModel):

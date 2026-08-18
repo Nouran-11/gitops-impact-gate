@@ -5,15 +5,21 @@ from __future__ import annotations
 import re
 from collections.abc import Sequence
 
+from impactgate.graph.edges import is_virtual_key
+
+PSEUDO_KINDS = frozenset({"File", "Kubernetes", "Image", "LabelSet", "MISSING"})
+SKIP_LABELS = frozenset({"(no pods)"})
+
 
 def from_paths(paths: Sequence[Sequence[str]]) -> str:
-    """Render reverse-reachability paths as a Mermaid flowchart."""
+    """Render reverse-reachability paths as a Mermaid flowchart of real k8s resources."""
     lines = ["flowchart LR"]
     seen_nodes: set[str] = set()
     seen_edges: set[tuple[str, str]] = set()
     for path in paths:
-        node_ids = [_node_id(item) for item in path]
-        for item, node_id in zip(path, node_ids, strict=True):
+        rendered = [item for item in path if is_rendered_key(item)]
+        node_ids = [_node_id(item) for item in rendered]
+        for item, node_id in zip(rendered, node_ids, strict=True):
             if node_id not in seen_nodes:
                 lines.append(f'  {node_id}["{_escape(item)}"]')
                 seen_nodes.add(node_id)
@@ -25,6 +31,19 @@ def from_paths(paths: Sequence[Sequence[str]]) -> str:
     if len(lines) == 1:
         lines.append('  empty["no impact"]')
     return "\n".join(lines)
+
+
+def is_rendered_key(key: str) -> bool:
+    """True for real Kubernetes resource keys; false for scanner/virtual nodes."""
+    if key in SKIP_LABELS:
+        return False
+    if is_virtual_key(key):
+        return False
+    parts = key.split("/")
+    if len(parts) < 2:
+        return False
+    kind = parts[1] if len(parts) >= 3 else parts[0]
+    return kind not in PSEUDO_KINDS and kind[:1].isupper()
 
 
 def _node_id(key: str) -> str:

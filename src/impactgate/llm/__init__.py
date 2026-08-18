@@ -19,11 +19,12 @@ from impactgate.llm.provider import (
 )
 from impactgate.llm.schema import ModelBatch, ModelVerdict
 from impactgate.metrics import REGISTRY
-from impactgate.models import Finding, Verdict
+from impactgate.models import Finding, Severity, Verdict
 from impactgate.prompting import PROMPT_VERSION
 
 LOGGER = logging.getLogger("impactgate.llm")
 BATCH_SIZE = 10
+SCANNER_LLM_MIN_SEVERITY = Severity.HIGH
 DEGRADED_EXPLANATION = (
     "Analysis was unavailable; the deterministic finding is shown without an LLM explanation."
 )
@@ -45,13 +46,17 @@ async def explain_findings(
     active = provider if provider is not None else build_provider()
     cached_verdicts: dict[str, Verdict] = {}
     pending: list[Finding] = []
+    verbatim: dict[str, Verdict] = {}
     for finding in findings:
+        if not needs_llm(finding):
+            verbatim[finding.id] = _verbatim_verdict(finding)
+            continue
         hit = cache.get_verdict(finding.id) if cache is not None else None
         if hit is not None:
             if cache is not None:
                 cache.stats.llm_calls_saved += 1
             REGISTRY.record_llm(getattr(active, "name", "unknown"), cached=True)
-            cached_verdicts[finding.id] = hit
+            cached_verdicts[finding.id] = _with_finding_meta(hit, finding)
         else:
             pending.append(finding)
     fresh: list[Verdict] = []
@@ -66,7 +71,7 @@ async def explain_findings(
     if cache is not None:
         for verdict in fresh:
             cache.put_verdict(verdict)
-    by_id = {**cached_verdicts, **{item.finding_id: item for item in fresh}}
+    by_id = {**verbatim, **cached_verdicts, **{item.finding_id: item for item in fresh}}
     ordered: list[Verdict] = []
     for finding in findings:
         if finding.id in by_id:
@@ -139,8 +144,8 @@ def _match_verdicts(findings: Sequence[Finding], parsed: Sequence[ModelVerdict])
             result.append(_degraded(finding))
             continue
         result.append(
-            Verdict(
-                finding_id=finding.id,
+            _verdict(
+                finding,
                 severity=raise_only(finding.severity_floor, match.severity),
                 explanation=match.explanation,
                 suggested_fix=match.suggested_fix,
@@ -154,15 +159,12 @@ def _take_match(remaining: list[ModelVerdict], finding_id: str) -> ModelVerdict 
     for index, item in enumerate(remaining):
         if item.finding_id == finding_id:
             return remaining.pop(index)
-    for index, item in enumerate(remaining):
-        if item.finding_id in {None, ""}:
-            return remaining.pop(index)
     return None
 
 
 def _degraded(finding: Finding) -> Verdict:
-    return Verdict(
-        finding_id=finding.id,
+    return _verdict(
+        finding,
         severity=finding.severity_floor,
         explanation=DEGRADED_EXPLANATION,
         suggested_fix=None,
@@ -170,25 +172,83 @@ def _degraded(finding: Finding) -> Verdict:
     )
 
 
+def _verbatim_verdict(finding: Finding) -> Verdict:
+    return _verdict(
+        finding,
+        severity=finding.severity_floor,
+        explanation=finding.evidence,
+        suggested_fix=None,
+        confidence=1.0,
+    )
+
+
+def _verdict(
+    finding: Finding,
+    *,
+    severity: Severity,
+    explanation: str,
+    suggested_fix: str | None,
+    confidence: float,
+) -> Verdict:
+    return Verdict(
+        finding_id=finding.id,
+        severity=severity,
+        explanation=explanation,
+        suggested_fix=suggested_fix,
+        confidence=confidence,
+        origin=finding.origin,
+        path=list(finding.path),
+        rule=finding.rule,
+    )
+
+
+def _with_finding_meta(verdict: Verdict, finding: Finding) -> Verdict:
+    return verdict.model_copy(
+        update={"origin": finding.origin, "path": list(finding.path), "rule": finding.rule}
+    )
+
+
+def needs_llm(finding: Finding) -> bool:
+    """Graph findings always; scanner findings only at or above the severity threshold."""
+    if finding.origin == "graph":
+        return True
+    return _severity_rank(finding.severity_floor) >= _severity_rank(SCANNER_LLM_MIN_SEVERITY)
+
+
+def _severity_rank(severity: Severity) -> int:
+    return {
+        Severity.LOW: 0,
+        Severity.MEDIUM: 1,
+        Severity.HIGH: 2,
+        Severity.CRITICAL: 3,
+    }[severity]
+
+
 def _group(findings: Sequence[Finding]) -> list[list[Finding]]:
+    """Keep same-rule findings together, then pack into batches of BATCH_SIZE."""
     by_rule: dict[str, list[Finding]] = {}
+    order: list[str] = []
     for finding in findings:
-        by_rule.setdefault(finding.rule, []).append(finding)
-    batches: list[list[Finding]] = []
-    for group in by_rule.values():
-        for start in range(0, len(group), BATCH_SIZE):
-            batches.append(group[start : start + BATCH_SIZE])
-    return batches
+        if finding.rule not in by_rule:
+            order.append(finding.rule)
+            by_rule[finding.rule] = []
+        by_rule[finding.rule].append(finding)
+    packed: list[Finding] = []
+    for rule in order:
+        packed.extend(by_rule[rule])
+    return [packed[start : start + BATCH_SIZE] for start in range(0, len(packed), BATCH_SIZE)]
 
 
 __all__ = [
     "BATCH_SIZE",
     "DEGRADED_EXPLANATION",
+    "SCANNER_LLM_MIN_SEVERITY",
     "FakeProvider",
     "PermanentError",
     "PROMPT_VERSION",
     "Provider",
     "build_provider",
     "explain_findings",
+    "needs_llm",
     "parse_verdicts",
 ]
