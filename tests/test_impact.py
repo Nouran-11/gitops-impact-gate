@@ -2,11 +2,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from impactgate.analysis.impact import compute_impact
 from impactgate.cli import app
-from impactgate.models import Severity
+from impactgate.models import Finding, ResourceRef, Severity, compute_finding_id
 
 from tests.helpers import graph_from_yaml, selector_break_graphs
 
@@ -70,7 +71,7 @@ spec:
     assert broken[0].severity_floor == Severity.MEDIUM
 
 
-def test_cli_selector_break_after_dir(tmp_path: Path) -> None:
+def test_cli_selector_break_after_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     before_dir = tmp_path / "before"
     after_dir = tmp_path / "after"
     root = Path(__file__).resolve().parents[1] / "demo" / "manifests" / "selector-break"
@@ -83,11 +84,42 @@ def test_cli_selector_break_after_dir(tmp_path: Path) -> None:
         _relabel_pod_template(deployment),
         encoding="utf-8",
     )
+
+    async def no_scanners(_files: object) -> list[Finding]:
+        return []
+
+    monkeypatch.setattr("impactgate.cli.run_all_scanners", no_scanners)
     result = runner.invoke(app, ["analyze", str(after_dir), "--before", str(before_dir)])
     assert result.exit_code == 0, result.output
     assert "**Risk:** high" in result.output
     assert "broken-selector" in result.output
     assert "demo/Ingress/public" in result.output
+
+
+def test_cli_merges_scanner_findings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    (tmp_path / "cm.yaml").write_text(
+        "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: ok\n  namespace: demo\n",
+        encoding="utf-8",
+    )
+    ref = ResourceRef(api_version="v1", kind="ConfigMap", name="ok", namespace="demo")
+    scanner_finding = Finding(
+        id=compute_finding_id("CKV_K8S_20", ref.key(), "root"),
+        origin="scanner",
+        rule="CKV_K8S_20",
+        resource=ref,
+        path=[ref.key()],
+        evidence="deployment.yaml: containers should not run as root",
+        severity_floor=Severity.HIGH,
+    )
+
+    async def fake_scanners(_files: object) -> list[Finding]:
+        return [scanner_finding]
+
+    monkeypatch.setattr("impactgate.cli.run_all_scanners", fake_scanners)
+    result = runner.invoke(app, ["analyze", str(tmp_path)])
+    assert result.exit_code == 0, result.output
+    assert "CKV_K8S_20" in result.output
+    assert "**Risk:** high" in result.output
 
 
 def _relabel_pod_template(text: str) -> str:
