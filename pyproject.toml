@@ -9,6 +9,7 @@ description = "GitOps impact gate: relationship-aware review of Kubernetes PRs"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [
+    "networkx>=3.3",
     "pydantic>=2.7",
     "pydantic-settings>=2.3",
     "pyyaml>=6.0",
@@ -20,6 +21,7 @@ dev = [
     "mypy>=1.11",
     "pytest>=8.3",
     "ruff>=0.6",
+    "types-networkx>=3.3",
     "types-PyYAML>=6.0",
 ]
 
