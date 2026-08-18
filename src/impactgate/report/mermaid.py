@@ -1,0 +1,1 @@
+"""Impact subgraph -> mermaid source."""

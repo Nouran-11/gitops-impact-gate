@@ -1,5 +1,11 @@
 # GitOps Impact Gate
 
+Relationship-aware review of Kubernetes infrastructure-as-code pull requests.
+
+```bash
+pip install -e ".[dev]"
+impactgate analyze demo/manifests/selector-break
+```
 For engineers who change Kubernetes manifests in Git: compute what a pull request breaks in the resource graph, then gate merge and (later) remediate failed workloads.
 
 This repo is a locked build spec (`AGENTS.md`). There is no `src/`, `pyproject.toml`, CLI, or tests in the tree. Do not treat the layout below as files that exist.
