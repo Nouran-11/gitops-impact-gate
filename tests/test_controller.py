@@ -392,3 +392,6 @@ def test_kopf_testing_utilities_are_available() -> None:
     assert KopfRunner is not None
     assert kopf.get_default_registry() is not None
     assert watcher.handle_failure is not None
+    watching = {handler.fn for handler in kopf.get_default_registry()._watching.get_all_handlers()}
+    assert watcher.handle_policy_event in watching
+    assert watcher.handle_pod_event in watching

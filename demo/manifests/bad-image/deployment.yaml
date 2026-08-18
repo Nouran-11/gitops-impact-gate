@@ -3,8 +3,6 @@ kind: Deployment
 metadata:
   name: storefront
   namespace: demo
-  labels:
-    impactgate.io/managed: "true"
 spec:
   replicas: 1
   selector:
@@ -14,6 +12,7 @@ spec:
     metadata:
       labels:
         app: storefront
+        impactgate.io/managed: "true"
     spec:
       containers:
         - name: storefront

@@ -24,6 +24,7 @@ class Settings(BaseSettings):
     no_cache: bool = False
     webhook_secret: str = ""
     cache_dir: str = ".impactgate-cache"
+    metrics_port: int = 8000
     repo_config_path: str | None = Field(default=None, exclude=True)
 
 

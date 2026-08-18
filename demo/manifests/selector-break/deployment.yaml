@@ -12,6 +12,7 @@ spec:
     metadata:
       labels:
         app: checkout
+        impactgate.io/managed: "true"
     spec:
       containers:
         - name: checkout

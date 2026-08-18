@@ -6,6 +6,8 @@ import threading
 import time
 from collections import defaultdict
 from datetime import datetime
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlparse
 
 ANALYSIS_BUCKETS: tuple[float, ...] = (0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, float("inf"))
 RECOVERY_BUCKETS: tuple[float, ...] = (10.0, 30.0, 60.0, 120.0, 300.0, 600.0, 1800.0, float("inf"))
@@ -187,3 +189,72 @@ class MetricsRegistry:
 
 
 REGISTRY = MetricsRegistry()
+
+_server_lock = threading.Lock()
+_http_server: ThreadingHTTPServer | None = None
+_http_thread: threading.Thread | None = None
+
+
+class _MetricsHandler(BaseHTTPRequestHandler):
+    def do_GET(self) -> None:  # noqa: N802
+        path = urlparse(self.path).path.rstrip("/") or "/"
+        if path != "/metrics":
+            self.send_error(404, "not found")
+            return
+        payload = REGISTRY.render().encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def log_message(self, format: str, *args: object) -> None:
+        del format, args
+
+
+def start_http_server(port: int = 8000, addr: str = "0.0.0.0") -> int:
+    """Serve REGISTRY at GET /metrics. Returns the bound port (port 0 is ephemeral)."""
+    global _http_server, _http_thread
+    with _server_lock:
+        if _http_server is not None:
+            bound = int(_http_server.server_address[1])
+            if port in (0, bound):
+                return bound
+            _stop_http_server_unlocked()
+        server = ThreadingHTTPServer((addr, port), _MetricsHandler)
+        thread = threading.Thread(
+            target=server.serve_forever,
+            name="impactgate-metrics",
+            daemon=True,
+        )
+        thread.start()
+        _http_server = server
+        _http_thread = thread
+        return int(server.server_address[1])
+
+
+def stop_http_server() -> None:
+    with _server_lock:
+        _stop_http_server_unlocked()
+
+
+def metrics_port() -> int | None:
+    with _server_lock:
+        if _http_server is None:
+            return None
+        return int(_http_server.server_address[1])
+
+
+def _stop_http_server_unlocked() -> None:
+    global _http_server, _http_thread
+    server = _http_server
+    thread = _http_thread
+    _http_server = None
+    _http_thread = None
+    if server is None:
+        return
+    server.shutdown()
+    server.server_close()
+    if thread is not None:
+        thread.join(timeout=2)
+
