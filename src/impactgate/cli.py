@@ -57,11 +57,11 @@ def analyze(
 ) -> None:
     """Analyze a directory of Kubernetes manifests and print a report."""
     settings = load_settings(repo_root=path, no_cache=no_cache)
-    decision = asyncio.run(_analyze(path, before, settings.llm_provider))
+    decision = asyncio.run(run_analysis(path, before, settings.llm_provider))
     typer.echo(render_report(decision), nl=False)
 
 
-async def _analyze(after_dir: Path, before_dir: Path | None, llm_provider: str) -> GateDecision:
+async def run_analysis(after_dir: Path, before_dir: Path | None, llm_provider: str) -> GateDecision:
     after_parsed = parse_directory(after_dir)
     if not after_parsed.ok:
         return _human_review(after_parsed)
