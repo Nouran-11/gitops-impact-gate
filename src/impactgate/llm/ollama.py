@@ -16,7 +16,7 @@ class OllamaProvider:
         self,
         *,
         host: str | None = None,
-        model: str = "llama3.2",
+        model: str = "llama3.1:8b",
         timeout: float = 30.0,
     ) -> None:
         self.host = (host or os.environ.get("OLLAMA_HOST") or "http://127.0.0.1:11434").rstrip("/")
