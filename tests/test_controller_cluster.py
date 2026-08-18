@@ -179,6 +179,57 @@ def test_controller_cli_documents_metrics_port() -> None:
     result = CliRunner().invoke(app, ["controller", "--help"])
     assert result.exit_code == 0
     assert "--metrics-port" in result.stdout
+    assert "--namespace" in result.stdout
+    assert "--all-namespaces" in result.stdout
+
+
+def test_controller_cli_runs_kopf_against_demo(monkeypatch: MonkeyPatch) -> None:
+    import kopf
+
+    from impactgate.cli import app
+
+    captured: dict[str, object] = {}
+
+    def fake_run(**kwargs: object) -> None:
+        captured.update(kwargs)
+
+    monkeypatch.setenv("IMPACTGATE_CONTROLLER_ENABLED", "true")
+    monkeypatch.setattr(kopf, "run", fake_run)
+    monkeypatch.setattr(kopf, "configure", lambda **_: None)
+    monkeypatch.setattr(
+        "impactgate.controller.cluster.attach_kubernetes_client",
+        lambda runtime: runtime.client,
+    )
+    result = CliRunner().invoke(app, ["controller"])
+    assert result.exit_code == 0, result.output
+    assert captured.get("clusterwide") is False
+    assert captured.get("namespaces") == ("demo",)
+    assert captured.get("standalone") is True
+    assert captured.get("registry") is kopf.get_default_registry()
+    assert "watching pods in namespace" in result.output
+
+
+def test_controller_cli_all_namespaces(monkeypatch: MonkeyPatch) -> None:
+    import kopf
+
+    from impactgate.cli import app
+
+    captured: dict[str, object] = {}
+
+    def fake_run(**kwargs: object) -> None:
+        captured.update(kwargs)
+
+    monkeypatch.setenv("IMPACTGATE_CONTROLLER_ENABLED", "true")
+    monkeypatch.setattr(kopf, "run", fake_run)
+    monkeypatch.setattr(kopf, "configure", lambda **_: None)
+    monkeypatch.setattr(
+        "impactgate.controller.cluster.attach_kubernetes_client",
+        lambda runtime: runtime.client,
+    )
+    result = CliRunner().invoke(app, ["controller", "--all-namespaces"])
+    assert result.exit_code == 0, result.output
+    assert captured.get("clusterwide") is True
+    assert "cluster-wide" in result.output
 
 
 def test_controller_startup_serves_metrics(monkeypatch: MonkeyPatch) -> None:

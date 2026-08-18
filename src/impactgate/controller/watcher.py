@@ -11,14 +11,13 @@ from typing import Any
 
 from impactgate.controller.actions import (
     Action,
-    AuditRecord,
     CircuitBreaker,
     ClusterClient,
     Diagnosis,
-    ReplicaSetRevision,
     classify_failure,
     execute_action,
 )
+from impactgate.controller.cluster import NullClusterClient, attach_kubernetes_client
 from impactgate.controller.policy import RemediationPolicy, default_policy, policy_from_crd
 from impactgate.metrics import REGISTRY, start_http_server
 
@@ -129,73 +128,6 @@ class ControllerRuntime:
             logger=self.logger,
             now=now,
         )
-
-
-class NullClusterClient:
-    def previous_logs(self, namespace: str, pod: str) -> str:
-        del namespace, pod
-        return ""
-
-    def pod_events(self, namespace: str, pod: str) -> list[str]:
-        del namespace, pod
-        return []
-
-    def owning_workload(self, namespace: str, pod: Mapping[str, Any]) -> str:
-        del namespace
-        return workload_from_pod(pod)
-
-    def replicaset_history(self, namespace: str, workload: str) -> list[str]:
-        del namespace, workload
-        return []
-
-    def list_revisions(self, namespace: str, workload: str) -> list[ReplicaSetRevision]:
-        del namespace, workload
-        return []
-
-    def rollback(self, namespace: str, workload: str, revision: str) -> str:
-        del namespace, workload
-        return f"rolled-back:{revision}"
-
-    def current_memory_limit(self, namespace: str, workload: str) -> str:
-        del namespace, workload
-        return "256Mi"
-
-    def bump_memory(self, namespace: str, workload: str, new_limit: str) -> str:
-        del namespace, workload
-        return f"memory-bumped:{new_limit}"
-
-    def restart(self, namespace: str, workload: str) -> str:
-        del namespace, workload
-        return "restarted"
-
-    def scale_out(self, namespace: str, workload: str) -> str:
-        del namespace, workload
-        return "scaled-out"
-
-    def emit_event(self, namespace: str, workload: str, message: str) -> None:
-        del namespace, workload, message
-
-    def record_audit(self, record: AuditRecord) -> None:
-        del record
-
-
-def workload_from_pod(pod: Mapping[str, Any]) -> str:
-    """Deployment/StatefulSet/DaemonSet name, walking ReplicaSet ownerReferences."""
-    metadata = pod.get("metadata") or {}
-    owners = metadata.get("ownerReferences") or []
-    if isinstance(owners, list):
-        for owner in owners:
-            if not isinstance(owner, dict):
-                continue
-            kind = owner.get("kind")
-            name = owner.get("name")
-            if not isinstance(name, str) or not name:
-                continue
-            if kind in {"Deployment", "StatefulSet", "DaemonSet"}:
-                return name
-            if kind == "ReplicaSet":
-                return name.rsplit("-", 1)[0] if "-" in name else name
-    return str(metadata.get("name") or "unknown")
 
 
 def compress_logs(raw: str, *, max_chars: int = 4000) -> str:
@@ -384,9 +316,10 @@ def handle_pod_event(body: Mapping[str, Any], **_: object) -> Action | None:
 
 
 def handle_startup(**_: object) -> int:
-    """Serve Prometheus text at /metrics for the controller process."""
+    """Serve Prometheus text at /metrics and attach a live cluster client."""
     from impactgate.config import load_settings
 
+    attach_kubernetes_client(RUNTIME)
     settings = load_settings()
     port = start_http_server(settings.metrics_port)
     LOGGER.info("serving /metrics on port %s", port)
