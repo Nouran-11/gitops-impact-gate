@@ -5,10 +5,10 @@ Follow this in order, copy-paste only, from the repository root (the directory t
 What this proves, in one sentence each:
 
 1. **PR gate (selector-break):** file-by-file linters accept a label rename; the graph finds `Service/checkout` matching zero pods and the path `Ingress → Service → (no pods)`.
-2. **Bad image:** a closed `Action` enum selects **rollback** for `ErrImagePull` / `ImagePullBackOff`.
+2. **Bad image:** a closed `Action` enum selects **rollback** for `ErrImagePull` / `ImagePullBackOff`, then the live client actually rolls the Deployment back.
 3. **Real bug (the important one):** the same CrashLoopBackOff path selects **escalate** — the system knows when not to act.
 
-Policy stays `mode: dry-run`. You are proving classification. After debounce the controller logs `dry-run: would rollback` or `dry-run: would escalate`. Do not patch the policy to `enforce` on stage: a real rollback also requires a ReplicaSet that has been fully Ready for ≥10 minutes, and you do not have that time.
+Demos 2 and 3 run with the policy in **`enforce`**. After debounce the controller logs `executed rollback on demo/storefront` or `escalate demo/payments; classified=escalate`. A real rollback also requires a ReplicaSet that has been fully Ready for **≥10 minutes**. That wait is part of the show: deploy storefront during Setup, run Demo 1 (several minutes), then break the image. Do not skip the clock.
 
 ---
 
@@ -58,7 +58,22 @@ sudo mv /tmp/kube-linter /usr/local/bin/kube-linter
 curl -fsSL https://ollama.com/install.sh | sh
 ```
 
-**Checkov via pipx, never `pip install checkov` into the project venv.** Checkov’s dependency set fights with ours. `pipx` keeps it on `PATH` in its own environment.
+**Checkov via pipx, never `pip install checkov` into the project venv.** Checkov pins an older `networkx` than the graph layer (`networkx>=3.3`). Installing it into `.venv` downgrades networkx and `impactgate analyze` breaks (import errors or empty graphs). `pipx` keeps checkov on `PATH` in its own environment.
+
+If checkov is already in the project venv (or a broken pipx copy is on `PATH`):
+
+```bash
+source .venv/bin/activate
+pip uninstall -y checkov
+pipx uninstall checkov
+pip install -e ".[dev]"
+python -c "import networkx; print(networkx.__version__)"
+# expect: 3.3 or newer
+pipx install checkov
+checkov --version
+```
+
+`pip install -e ".[dev]"` restores the project’s networkx. Do not `pip install checkov` again.
 
 ### Project venv
 
@@ -101,12 +116,13 @@ kubectl get nodes
 kubectl apply -f deploy/crd.yaml
 kubectl get ns demo >/dev/null 2>&1 || kubectl create namespace demo
 kubectl apply -f deploy/policy.yaml
+kubectl apply -f deploy/rbac.yaml
 kubectl apply -f demo/manifests/bad-image/deployment.yaml
 kubectl -n demo rollout status deployment/storefront --timeout=120s
 kubectl -n demo delete deployment storefront
 ```
 
-`rollout status` succeeding means `nginx:1.25` is cached in the node. Demo 2’s bad tag must **not** be pulled in advance.
+`rollout status` succeeding means `nginx:1.25` is cached in the node. Demo 2’s bad tag must **not** be pulled in advance. Deleting storefront here is only to leave a quiet cluster overnight. You will deploy it again during Setup and **leave it running** so the 10-minute healthy ReplicaSet clock can start.
 
 ### Verify binaries
 
@@ -138,13 +154,13 @@ python --version
 # expect: Python 3.12.x
 
 pytest -q
-# expect: N passed, 0 failed (currently 155 passed in ~7s)
+# expect: N passed, 0 failed (currently 175 passed in ~7s)
 
 ruff check src tests
 # expect: All checks passed!
 
 mypy
-# expect: Success: no issues found in 40 source files
+# expect: Success: no issues found in 41 source files
 
 IMPACTGATE_LLM_PROVIDER=fake impactgate analyze demo/manifests/selector-break --no-cache
 # expect:
@@ -159,10 +175,13 @@ kubectl get crd remediationpolicies.impactgate.io
 # expect: NAME ... CREATED AT
 
 kubectl -n demo get remediationpolicy default -o yaml
-# expect: spec.mode: dry-run
+# expect: spec.mode: dry-run   (the shipped file; Setup patches this to enforce)
 
 python -c "import impactgate.controller.watcher as w; print(w.__file__)"
 # expect: a path under this repo (…/src/impactgate/controller/watcher.py)
+
+python -c "import networkx; print(networkx.__version__)"
+# expect: 3.3 or newer. If this is 2.x, checkov was pip-installed into the venv — see Checkov above.
 
 curl -sS -o /dev/null -w "%{http_code}\n" http://127.0.0.1:11434/api/tags
 # expect: 200  (ollama). If this is not 200, Demo 1 uses fake (already exported above).
@@ -197,9 +216,9 @@ kubectl config use-context kind-impactgate
 
 That create takes about a minute.
 
-### 2. CRD first, then namespace, then policy
+### 2. CRD first, then namespace, then policy, then RBAC
 
-Two files, two applies, CRD first. A combined apply is rejected on a fresh cluster because the `RemediationPolicy` instance is validated before the CRD exists.
+Two YAML applies for the API, CRD first. A combined apply is rejected on a fresh cluster because the `RemediationPolicy` instance is validated before the CRD exists.
 
 ```bash
 kubectl apply -f deploy/crd.yaml
@@ -221,15 +240,11 @@ Expected: `namespace/demo created`, or no output if it already exists.
 
 ```bash
 kubectl apply -f deploy/policy.yaml
+kubectl apply -f deploy/rbac.yaml
+kubectl -n demo patch remediationpolicy/default --type merge -p '{"spec":{"mode":"enforce"}}'
 ```
 
-Expected:
-
-```text
-remediationpolicy.impactgate.io/default created
-```
-
-or `configured`. Confirm:
+Expected: `remediationpolicy.impactgate.io/default created` (or `configured`), then `patched`. Confirm:
 
 ```bash
 kubectl -n demo get remediationpolicy default -o jsonpath='{.spec.mode} {.spec.allowedActions}{"\n"}'
@@ -238,10 +253,10 @@ kubectl -n demo get remediationpolicy default -o jsonpath='{.spec.mode} {.spec.a
 Expected:
 
 ```text
-dry-run ["rollback","restart"]
+enforce ["rollback","restart"]
 ```
 
-Do not patch this to `enforce`.
+`deploy/policy.yaml` ships as `dry-run`. Demos 2 and 3 need `enforce`. Do not skip the patch.
 
 ### 3. Confirm the label that the gate actually reads
 
@@ -261,57 +276,84 @@ grep -n 'impactgate.io/managed' demo/manifests/bad-image/deployment.yaml demo/ma
 
 Expected: each hit is under `template:` / `labels:`, not under the Deployment’s own `metadata:`.
 
----
-
-## Terminal layout
+### 4. Terminals, then start the controller, then deploy storefront
 
 Open four terminals. Activate the venv in 1, 3, and 4. Set the kubectl context in 2, 3, and 4.
 
 | Terminal | Title | What runs | Type in it? |
 |---|---|---|---|
-| **1** | `CONTROLLER` | `kopf run` | **Never.** One accidental Ctrl-C ends Demos 2 and 3. |
+| **1** | `CONTROLLER` | `impactgate controller --namespace demo -v` | **Never.** One accidental Ctrl-C ends Demos 2 and 3. |
 | **2** | `PODS` | `kubectl -n demo get pods -w` | Do not type. Watch phases and reasons. |
 | **3** | `OPS` | Every command in this runbook | Yes. This is the only working terminal. |
 | **4** | `METRICS` | `curl` when asked | Only the curl. Keep the output on screen. |
 
-Start Terminal 1 **after** Setup (CRD + policy), **before** Demo 2. Demo 1 does not need it.
+Start Terminal 1 **now**, before storefront, so it can attach `KubernetesClusterClient` and stamp the healthy ReplicaSet. Demo 1 does not need the controller, but it is how you burn the 10-minute wait.
 
-### Start the controller (Terminal 1)
+#### Start the controller (Terminal 1)
 
-This is the command that actually watches pods:
+This is the primary command. It watches pods in `demo` and attaches `KubernetesClusterClient`:
 
 ```bash
 source .venv/bin/activate
 cd "$(git rev-parse --show-toplevel)"
-IMPACTGATE_CONTROLLER_ENABLED=true kopf run -m impactgate.controller.watcher --namespace demo --verbose
+IMPACTGATE_CONTROLLER_ENABLED=true impactgate controller --namespace demo -v
 ```
 
-Expected within a few seconds (kopf timestamps vary; the payload must appear):
+Expected within a few seconds (timestamps vary; these payloads must appear):
 
 ```text
-serving /metrics on port 8000
+metrics listening on :8000/metrics
+watching pods in namespace(s): demo
+using KubernetesClusterClient
+loaded RemediationPolicy demo/default mode=enforce allowed=['rollback', 'restart']
 ```
 
-and, because the policy already exists:
+kopf may also log `serving /metrics on port 8000`. That is the same process. Leave this terminal alone.
 
-```text
-loaded RemediationPolicy demo/default mode=dry-run allowed=['rollback', 'restart']
+If the CLI cannot start (missing flag, bind error), fallback — same operator, same watches:
+
+```bash
+IMPACTGATE_CONTROLLER_ENABLED=true kopf run -m impactgate.controller.watcher --namespace demo --standalone --verbose
 ```
 
-Leave this terminal alone.
+Do not run both. One process, port 8000.
 
-`impactgate controller` starts the metrics server and does **not** watch pods. A CrashLoopBackOff will produce no controller output. Do not use it.
-
-If kopf complains about peering / another operator, rerun the same command with `--standalone` appended. Do not switch to `impactgate controller`.
-
-### Start the pod watch (Terminal 2)
+#### Start the pod watch (Terminal 2)
 
 ```bash
 kubectl config use-context kind-impactgate
 kubectl -n demo get pods -w
 ```
 
-Empty is fine until Demo 2.
+Empty is fine until storefront exists.
+
+#### Deploy storefront and start the 10-minute clock (Terminal 3)
+
+`ROLLBACK` may only target a ReplicaSet that has had all replicas Ready for **≥10 minutes**. Deploy it now. Do not break the image until that clock has elapsed.
+
+```bash
+kubectl apply -f demo/manifests/bad-image/deployment.yaml
+kubectl -n demo rollout status deployment/storefront --timeout=120s
+kubectl -n demo get deploy storefront -o jsonpath='{.spec.template.metadata.labels}{"\n"}'
+kubectl -n demo get pods -l app=storefront --show-labels
+date -u +%H:%M:%S
+```
+
+Expected jsonpath:
+
+```text
+{"app":"storefront","impactgate.io/managed":"true"}
+```
+
+The pod `--show-labels` line **must** include `impactgate.io/managed=true`. If it does not, stop and fix the template labels; the controller will log `skipping unmanaged pod` and never decide.
+
+Terminal 2: pod `Running` / `Ready`. Write down the UTC time from `date`. **Do not `set image` until 10 minutes after this Ready.** Demo 1 is what you do during that wait. If Demo 1 finishes early, sit still. Breaking early yields `escalate demo/storefront; classified=rollback` and the image stays broken.
+
+Optional check that the controller stamped the healthy revision (the annotation time is the start of the 10-minute window):
+
+```bash
+kubectl -n demo get rs -l app=storefront -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.metadata.annotations.impactgate\.io/fully-ready-since}{"\n"}{end}'
+```
 
 ---
 
@@ -319,7 +361,7 @@ Empty is fine until Demo 2.
 
 **Claim:** Checkov and kube-linter look at one file. They cannot see that renaming a pod label leaves `Service/checkout` selecting nothing while `Ingress/public` still routes to that Service.
 
-**Duration:** about 2 minutes if Ollama answers; about 15 seconds with `fake`.
+**Duration:** several minutes if Ollama answers; about 15 seconds with `fake`. Either way, storefront keeps running. This is the 10-minute healthy-ReplicaSet wait.
 
 Work only on copies. Do not edit `demo/manifests/selector-break` in git.
 
@@ -447,34 +489,25 @@ rm -rf /tmp/ig-before /tmp/ig-after
 git checkout -- demo/manifests/selector-break
 ```
 
+Do **not** delete storefront. Check the clock. If fewer than 10 minutes have passed since storefront became Ready, wait. Then Demo 2.
+
 ---
 
 ## Demo 2 — bad image → rollback
 
-**Claim:** a missing image is classified as **rollback**, from a fixed enum, not from generated `kubectl`.
+**Claim:** a missing image is classified as **rollback**, from a fixed enum, not from generated `kubectl`. The live client then copies the last healthy ReplicaSet’s pod template back onto the Deployment. No human patches the image.
 
-**Duration:** apply is seconds; then **one to two minutes of apparent silence** while debounce counts to 3 failures in a 5-minute window. That wait is the demo working. Do not restart the controller.
+**Duration:** `set image` is seconds; then **one to two minutes of apparent silence** while debounce counts to 3 failures in a 5-minute window; then the rollback and the Event. That wait is the demo working. Do not restart the controller. Do not delete the Deployment when the decision line appears — that is when the rollback and the Event show up.
 
-Terminal 1 must already be running `kopf run`. Terminal 2 must already be `get pods -w`.
+Preconditions (from Setup): Terminal 1 is `impactgate controller --namespace demo -v`, Terminal 2 is `get pods -w`, storefront has been Ready for ≥10 minutes, policy is `enforce`.
 
-### 1. Deploy the healthy storefront
+### 1. Confirm storefront is still the healthy image
 
 ```bash
-kubectl apply -f demo/manifests/bad-image/deployment.yaml
-kubectl -n demo rollout status deployment/storefront --timeout=120s
-kubectl -n demo get deploy storefront -o jsonpath='{.spec.template.metadata.labels}{"\n"}'
-kubectl -n demo get pods -l app=storefront --show-labels
+kubectl -n demo get deploy storefront -o jsonpath='{.spec.template.spec.containers[0].image}{"\n"}'
 ```
 
-Expected jsonpath:
-
-```text
-{"app":"storefront","impactgate.io/managed":"true"}
-```
-
-The pod `--show-labels` line **must** include `impactgate.io/managed=true`. If it does not, stop and fix the template labels; the controller will log `skipping unmanaged pod` and never decide.
-
-Terminal 2: pod `Running` / `Ready`.
+Expected: `nginx:1.25`. If the Deployment is missing, you deleted it — apply `demo/manifests/bad-image/deployment.yaml`, wait for Ready, and wait **another** 10 minutes. Do not continue.
 
 ### 2. Break the image
 
@@ -482,9 +515,17 @@ Terminal 2: pod `Running` / `Ready`.
 kubectl -n demo set image deployment/storefront storefront=nginx:does-not-exist
 ```
 
+Confirm the spec actually changed:
+
+```bash
+kubectl -n demo get deploy storefront -o jsonpath='{.spec.template.spec.containers[0].image}{"\n"}'
+```
+
+Expected: `nginx:does-not-exist`.
+
 Terminal 2 should move to `ErrImagePull` and then `ImagePullBackOff` (either reason is fine; both classify as rollback).
 
-### 3. Wait. Do not type.
+### 3. Wait. Do not type. Do not delete.
 
 On Terminal 1 you should first see, more than once:
 
@@ -499,16 +540,44 @@ or the same line with `ImagePullBackOff`.
 Then the decision line (this is the slide):
 
 ```text
-dry-run: would rollback on demo/storefront (reason=ErrImagePull, mode=dry-run, allowed=['rollback', 'restart'])
+executed rollback on demo/storefront: rolled-back:storefront-586c8c4fdf
 ```
 
-`reason=ImagePullBackOff` is the same win. `mode=dry-run` is expected. `allowed=[]` means the policy never loaded — see troubleshooting.
+The ReplicaSet suffix is the healthy hash from your cluster; it will not match that string. `reason=ImagePullBackOff` is the same win. `escalate demo/storefront; classified=rollback` means the 10-minute healthy revision was missing — you broke too early. `allowed=[]` means the policy never loaded. `demo/unknown` means ownerReferences were not resolved — you are on an old build; pull `main`.
 
-Leave storefront crashing only until you have pointed at that line, then delete it so Demo 3’s logs are unambiguous:
+**Leave storefront alone.** The rollback, the scale-down of the broken ReplicaSet, and the Kubernetes Event happen on this Deployment after that line. Deleting it here kills the proof.
+
+### 4. Verify the live rollback
 
 ```bash
-kubectl -n demo delete deployment storefront
+kubectl -n demo get deploy storefront -o jsonpath='{.spec.template.spec.containers[0].image}{"\n"}'
 ```
+
+Expected: `nginx:1.25` (no longer `nginx:does-not-exist`). No human ran `kubectl set image` back.
+
+```bash
+kubectl -n demo get rs -l app=storefront
+```
+
+The broken ReplicaSet (the one created for `does-not-exist`) is scaled to **0**. The healthy one is at 1.
+
+```bash
+kubectl -n demo get events --field-selector involvedObject.kind=Deployment,involvedObject.name=storefront
+```
+
+or:
+
+```bash
+kubectl -n demo get events --field-selector reason=ImpactGateRemediation
+```
+
+Expected: an Event `ImpactGateRemediation` on the Deployment whose message looks like:
+
+```text
+impactgate rollback: rolled-back:storefront-586c8c4fdf
+```
+
+Terminal 2: a new storefront pod `Running` / `Ready`.
 
 ---
 
@@ -516,7 +585,7 @@ kubectl -n demo delete deployment storefront
 
 **Claim:** a process that prints a traceback and exits is an application bug. The controller **escalates** (notify a human, do not rollback/restart). This is the demo that proves the system knows when not to act. A tool that remediates every crash is dangerous; this one refuses.
 
-**Duration:** same as Demo 2 — apply, then **one to two minutes** for debounce.
+**Duration:** apply, then **one to two minutes** for debounce. Policy stays `enforce`. Escalate does not need a 10-minute healthy revision.
 
 ### 1. Deploy healthy payments
 
@@ -574,12 +643,12 @@ debouncing demo/payments after CrashLoopBackOff
 Then, after the same **one-to-two-minute** wait:
 
 ```text
-dry-run: would escalate on demo/payments (reason=CrashLoopBackOff, mode=dry-run, allowed=['rollback', 'restart'])
+escalate demo/payments; classified=escalate
 ```
 
-That is the line. Contrast it with Demo 2’s `would rollback`. Same machinery, opposite action, because the evidence looks like a traceback rather than a bad image.
+That is the line. Contrast it with Demo 2’s `executed rollback`. Same machinery, opposite action, because the evidence looks like a traceback rather than a bad image. Payments stays on the broken command — the controller refused to “fix” an application bug.
 
-If you instead see `would restart`, the traceback never reached the classifier — see troubleshooting. Do not ad-lib a rollback.
+If you instead see `executed restart`, the traceback never reached the classifier — see troubleshooting. Do not ad-lib a rollback.
 
 ---
 
@@ -605,26 +674,26 @@ impactgate_analysis_duration_seconds
 After Demo 2 you should be able to point at:
 
 ```text
-impactgate_remediation_total{action="rollback",outcome="dry-run"}
+impactgate_remediation_total{action="rollback",outcome="executed"}
 ```
 
 After Demo 3:
 
 ```text
-impactgate_remediation_total{action="escalate",outcome="dry-run"}
+impactgate_remediation_total{action="escalate",outcome="escalated"}
 ```
 
-`impactgate_time_to_recovery_seconds` is the MTTR histogram (clock starts at **detection**, not at action). In dry-run the cluster does not heal, so `_count` stays `0` unless a pod becomes Ready on its own. Point at the series name, not at a made-up number.
+`impactgate_time_to_recovery_seconds` is the MTTR histogram (clock starts at **detection**, not at action). In **enforce**, after storefront becomes Ready again, `impactgate_time_to_recovery_seconds_count` is **non-zero**. Mean recovery is `_sum / _count` (seconds). Point at those two series, not at a made-up bucket. In dry-run the cluster does not heal and `_count` stays `0`.
 
-`impactgate_findings_total` and `impactgate_gate_decisions_total` are recorded in the **analyze** process, not in kopf. Do not hunt for `broken-selector` on `:8000` after Demo 1.
+`impactgate_findings_total` and `impactgate_gate_decisions_total` are recorded in the **analyze** process, not in the controller. Do not hunt for `broken-selector` on `:8000` after Demo 1.
 
-If curl hangs or connection-refused: Terminal 1 is not running, or metrics never printed `serving /metrics on port 8000`.
+If curl hangs or connection-refused: Terminal 1 is not running, or metrics never printed `metrics listening on :8000/metrics` / `serving /metrics on port 8000`.
 
 ---
 
 ## Teardown and reset (between rehearsals)
 
-You want a quiet cluster and a reset debounce. Debounce lives in the kopf process memory.
+You want a quiet cluster and a reset debounce. Debounce lives in the controller process memory.
 
 ```bash
 # Terminal 3
@@ -639,18 +708,22 @@ git status
 Then **Ctrl-C only Terminal 1** (this is the one time you touch it) and start it again with the same command:
 
 ```bash
-IMPACTGATE_CONTROLLER_ENABLED=true kopf run -m impactgate.controller.watcher --namespace demo --verbose
+IMPACTGATE_CONTROLLER_ENABLED=true impactgate controller --namespace demo -v
 ```
 
 Restart Terminal 2’s `kubectl -n demo get pods -w` if it exited.
 
-Leave the CRD, namespace, and policy in place. Re-apply if you deleted them:
+Leave the CRD, namespace, and policy in place. Re-apply if you deleted them, then patch enforce again:
 
 ```bash
 kubectl apply -f deploy/crd.yaml
 kubectl get ns demo >/dev/null 2>&1 || kubectl create namespace demo
 kubectl apply -f deploy/policy.yaml
+kubectl apply -f deploy/rbac.yaml
+kubectl -n demo patch remediationpolicy/default --type merge -p '{"spec":{"mode":"enforce"}}'
 ```
+
+Before the next Demo 2, deploy storefront and wait **10 minutes Ready** again.
 
 ### Full teardown (end of day)
 
@@ -667,32 +740,48 @@ git checkout -- demo/manifests
 
 | Symptom | Likely cause | What to do (exact) |
 |---|---|---|
-| Terminal 1 has metrics / kopf startup but **no** `debouncing` / `would rollback` / `would escalate` | You started `impactgate controller`, or the pod is missing the managed label | Confirm Terminal 1’s first command line is `kopf run -m impactgate.controller.watcher`. Then: `kubectl -n demo get pods --show-labels` — must contain `impactgate.io/managed=true`. If not, the label is on the Deployment object instead of `spec.template.metadata.labels`. |
+| Terminal 1 has metrics but **no** `using KubernetesClusterClient` | Kubeconfig missing / API unreachable | Confirm `kubectl config current-context` is `kind-impactgate`. Restart Terminal 1 with the primary CLI command. |
+| Terminal 1 has startup but **no** `debouncing` / `executed rollback` / `escalate` | Pod missing the managed label, or wrong namespace | `kubectl -n demo get pods --show-labels` — must contain `impactgate.io/managed=true`. If not, the label is on the Deployment object instead of `spec.template.metadata.labels`. Confirm Terminal 1’s command is `impactgate controller --namespace demo -v`. |
 | `skipping unmanaged pod …` | Label gate reads pod labels | `kubectl -n demo get deploy storefront -o jsonpath='{.spec.template.metadata.labels}{"\n"}'` must include `"impactgate.io/managed":"true"`. Recreate from `demo/manifests/…/deployment.yaml`. |
+| `debouncing demo/unknown` or `deployments.apps "unknown" not found` | Old build: kopf `Body` ownerReferences not resolved | `git pull` on `main` (the Body fix). Restart the controller. With `-v` you should see raw `ownerReferences` in debug logs. |
 | Analyze prints `**Risk:** low` / `no findings` | You analyzed the clean tree, or you edited `matchLabels` instead of the template, or you forgot `--before` after a previous dirty run that you then “fixed” the wrong way | `grep -n 'app:' /tmp/ig-after/deployment.yaml` — template line must be `checkout-v2`, matchLabels `checkout`. Redo the copy + python block. Command is `impactgate analyze /tmp/ig-after --before /tmp/ig-before --no-cache`. |
 | Analyze hangs or talks about Gemini | `IMPACTGATE_LLM_PROVIDER` unset | Ctrl-C. `export IMPACTGATE_LLM_PROVIDER=fake` and rerun the same analyze command. |
+| Analyze crashes / graph is empty after installing scanners | `pip install checkov` into `.venv` downgraded networkx | `pip uninstall -y checkov; pipx uninstall checkov; pip install -e ".[dev]"` then `python -c "import networkx; print(networkx.__version__)"` must be ≥3.3. `pipx install checkov`. |
 | Checkov / kube-linter exit 1 | Style checks (CPU, memory, seccomp) | Ignore. Ask whether they mentioned the Service selector. They did not. Continue to `impactgate analyze`. |
 | Pod stays `Running` after the Demo 2/3 break | Patch / `set image` did not apply | Demo 2: `kubectl -n demo get deploy storefront -o jsonpath='{.spec.template.spec.containers[0].image}{"\n"}'` must be `nginx:does-not-exist`. Demo 3: `kubectl -n demo get deploy payments -o jsonpath='{.spec.template.spec.containers[0].args}{"\n"}'` must contain `Traceback`. Re-apply the break command. |
-| `dry-run: would restart` on Demo 3 | Traceback never reached the classifier | Confirm args as above. `kubectl -n demo logs -l app=payments --tail=20` should show `Traceback (most recent call last):`. Recreate: delete the deployment, apply clean YAML, apply `/tmp/ig-real-bug/deployment.yaml` again, wait the full debounce. |
-| `mode=dry-run, allowed=[]` in the decision line | Policy not loaded | `kubectl apply -f deploy/policy.yaml`. Look on Terminal 1 for `loaded RemediationPolicy demo/default`. Classification still works; the allow-list is cosmetic in dry-run. |
+| `executed restart` on Demo 3 | Traceback never reached the classifier | Confirm args as above. `kubectl -n demo logs -l app=payments --tail=20` should show `Traceback (most recent call last):`. Recreate: delete the payments deployment, apply clean YAML, apply `/tmp/ig-real-bug/deployment.yaml` again, wait the full debounce. |
+| `escalate … classified=rollback` and image still `does-not-exist` | No ReplicaSet had been fully Ready for ≥10 minutes | Check `kubectl -n demo get rs -l app=storefront -o yaml` for `impactgate.io/fully-ready-since`. Restore `nginx:1.25`, wait a full 10 minutes Ready, then break again. Do not delete the Deployment after the decision line. |
+| `mode=dry-run` in the decision line | Policy patch skipped | `kubectl -n demo patch remediationpolicy/default --type merge -p '{"spec":{"mode":"enforce"}}'`. Look on Terminal 1 for `loaded RemediationPolicy demo/default mode=enforce`. |
+| `allowed=[]` in the decision line | Policy not loaded | `kubectl apply -f deploy/policy.yaml` then re-patch `enforce`. Look on Terminal 1 for `loaded RemediationPolicy demo/default`. |
 | `error: resource mapping not found` on policy | CRD not applied first | `kubectl apply -f deploy/crd.yaml` then `kubectl apply -f deploy/policy.yaml`. |
-| `ModuleNotFoundError: impactgate` from kopf | Venv not active | `source .venv/bin/activate` in Terminal 1 and rerun `kopf run`. |
-| `curl: (7) Failed to connect … 8000` | Controller not running or startup handler did not bind | Terminal 1 must show `serving /metrics on port 8000`. Do not start a second kopf (port in use). |
-| You already waited two minutes and still only `debouncing` | Threshold not reached yet, or events stopped | Watch Terminal 2: the pod must still be `ImagePullBackOff` / `CrashLoopBackOff`. If the pod disappeared, the break did not stick. If it is crashing, keep waiting up to five minutes; do not restart kopf unless you are willing to wait again from zero. |
-| Someone patched policy to `enforce` | Rollback then needs a 10-minute healthy ReplicaSet and will likely **escalate** instead | `kubectl apply -f deploy/policy.yaml` to restore `dry-run`. Restart kopf. |
+| `ModuleNotFoundError: impactgate` | Venv not active | `source .venv/bin/activate` in Terminal 1 and rerun `impactgate controller --namespace demo -v`. |
+| `curl: (7) Failed to connect … 8000` | Controller not running or startup did not bind | Terminal 1 must show `metrics listening on :8000/metrics` or `serving /metrics on port 8000`. Do not start a second controller (port in use). |
+| You already waited two minutes and still only `debouncing` | Threshold not reached yet, or events stopped | Watch Terminal 2: the pod must still be `ImagePullBackOff` / `CrashLoopBackOff`. If the pod disappeared, the break did not stick. If it is crashing, keep waiting up to five minutes; do not restart the controller unless you are willing to wait again from zero (and, for Demo 2, another 10 minutes Ready). |
 
 ---
 
 ## One-page crib (print this)
 
 ```bash
-# Terminal 1 — NEVER TYPE
-IMPACTGATE_CONTROLLER_ENABLED=true kopf run -m impactgate.controller.watcher --namespace demo --verbose
+# Terminal 1 — NEVER TYPE  (primary; kopf run is fallback)
+IMPACTGATE_CONTROLLER_ENABLED=true impactgate controller --namespace demo -v
+# fallback:
+# IMPACTGATE_CONTROLLER_ENABLED=true kopf run -m impactgate.controller.watcher --namespace demo --standalone --verbose
 
 # Terminal 2 — NEVER TYPE
 kubectl -n demo get pods -w
 
-# Demo 1
+# Setup (before Demo 1) — start the 10-minute healthy RS clock
+kubectl apply -f deploy/crd.yaml
+kubectl get ns demo >/dev/null 2>&1 || kubectl create namespace demo
+kubectl apply -f deploy/policy.yaml
+kubectl apply -f deploy/rbac.yaml
+kubectl -n demo patch remediationpolicy/default --type merge -p '{"spec":{"mode":"enforce"}}'
+kubectl apply -f demo/manifests/bad-image/deployment.yaml
+kubectl -n demo rollout status deployment/storefront --timeout=120s
+# note UTC time; do not set image until +10 minutes
+
+# Demo 1 (burns the 10-minute wait)
 rm -rf /tmp/ig-before /tmp/ig-after
 cp -a demo/manifests/selector-break /tmp/ig-before
 cp -a demo/manifests/selector-break /tmp/ig-after
@@ -702,16 +791,18 @@ kube-linter lint /tmp/ig-after
 IMPACTGATE_LLM_PROVIDER=ollama impactgate analyze /tmp/ig-after --before /tmp/ig-before --no-cache
 # key line: ### critical: `broken-selector`
 
-# Demo 2
-kubectl apply -f demo/manifests/bad-image/deployment.yaml
+# Demo 2 — storefront already running; do not delete after the decision
 kubectl -n demo set image deployment/storefront storefront=nginx:does-not-exist
-# wait 1–2 min → dry-run: would rollback on demo/storefront
+# wait 1–2 min → executed rollback on demo/storefront: rolled-back:storefront-…
+kubectl -n demo get deploy storefront -o jsonpath='{.spec.template.spec.containers[0].image}{"\n"}'
+# expect: nginx:1.25
+kubectl -n demo get events --field-selector reason=ImpactGateRemediation
 
 # Demo 3
 kubectl apply -f demo/manifests/real-bug/deployment.yaml
 # apply /tmp/ig-real-bug after the python patch block
-# wait 1–2 min → dry-run: would escalate on demo/payments
+# wait 1–2 min → escalate demo/payments; classified=escalate
 
-# Metrics
+# Metrics  (enforce: _count is non-zero after storefront recovers; mean = _sum / _count)
 curl -sS http://127.0.0.1:8000/metrics
 ```
