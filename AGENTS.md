@@ -506,7 +506,75 @@ Do not build these, even if they seem useful:
 - Terraform support (M9 at the earliest, and only if everything else is complete)
 - Helm chart templating or Kustomize overlay rendering
 - Multi-repo or multi-cluster support
-- A user-facing web dashboard
+- A user-facing web dashboard (the metrics endpoint is not a UI)
 - Any form of authentication beyond the GitHub webhook signature
 - Automatic merging of PRs — the tool sets a status, humans merge
 - Storing anything in a database
+- Message queues or microservices (one process; modules talk by import)
+- AWS, GCP, or other paid cloud — local `kind` only
+- Slack or other chat integrations
+- LLM-discovered findings, or generated `kubectl` / shell
+- A new PR comment per push (one comment, updated in place)
+- Treating Checkov / Trivy / kube-linter as sufficient without the graph
+- Marketplace, orgs, billing, or currency
+- i18n / RTL
+- `/health`
+- Acting on workloads without `impactgate.io/managed: "true"`
+- `mode: enforce` as a global default
+
+---
+
+## 17. Locked decisions
+
+| Locked decision | Value |
+|---|---|
+| Product name | GitOps Impact Gate |
+| Code package / import root | `impactgate` |
+| GitHub commit status name | `impact-gate` |
+| Language | Python 3.12 only (CLI, webhook, controller) |
+| Process shape | One service; modules talk by import, not network |
+| Auth | HMAC `X-Hub-Signature-256` vs webhook secret. Unsigned → 401. No user accounts |
+| Tenancy | One deployment; one GitHub repo per webhook event. Not a marketplace |
+| Primary channel | GitHub PR comment (updated in place) + status `impact-gate` |
+| Default language | English (LLM prompt and PR comment). No i18n layer |
+| LLM default | `GeminiProvider`, selected by `IMPACTGATE_LLM_PROVIDER` |
+| Runtime cluster | local `kind` only |
+| Parse errors | Fail closed: verdict is needs human review, never safe |
+| LLM role | Explain / rank / patch findings already produced. Never discover findings. Never emit executable commands |
+| Cache disable | `--no-cache` CLI flag and `IMPACTGATE_NO_CACHE` |
+| Metrics bind | `IMPACTGATE_METRICS_PORT` / `--metrics-port` (default 8000; port 0 is ephemeral) |
+
+---
+
+## 18. Canonical vocabulary
+
+Enums and rule names stay English `snake_case` in code. There is no translated UI. GitHub check name `impact-gate` and CRD YAML keys (`minConfidence`, `dry-run`) are wire format, not separate entities. Graph integrity **rule** strings on `Finding.rule` use kebab-case (`broken-selector`) as implemented.
+
+| Term | Definition |
+|---|---|
+| GitOps Impact Gate | Product name. One product. |
+| `impactgate` | Python package. Same product. |
+| `impact-gate` | GitHub commit status context only. Do not use as the product name or package name. |
+| Resource | Parsed Kubernetes object (`ref`, full manifest in `spec`, `source_file`, `source_line`) |
+| ResourceRef | Identity: `api_version`, `kind`, `name`, `namespace`. `key()` = `{namespace or '_cluster'}/{kind}/{name}` |
+| manifest | YAML document on disk. Do not use as a model name. |
+| Workload | Role: Deployment, StatefulSet, or DaemonSet. Not a Kubernetes `kind`. |
+| Edge | Directed relation `source` → `target` with `EdgeKind` and `detail` |
+| EdgeKind | `SELECTS`, `ROUTES_TO`, `MOUNTS_CONFIG`, `MOUNTS_SECRET`, `ENV_FROM`, `CLAIMS`, `RUNS_AS`, `GRANTS`, `SCALES`, `TARGETS`, `IMAGE` |
+| virtual node | Graph node that is not a Resource: a label set, or a container image string |
+| MISSING | Marker on an Edge target that does not exist. Keep the edge. Do not drop it. |
+| Finding | One verified problem. `origin` is `graph` or `scanner`. Main work entity for CI. |
+| rule | Graph: `broken-selector`, `dangling-reference`, `orphaned-ingress`, `unreachable-workload` (and later `policy-contradiction`, `image-regression`, `scale-target-missing`). Scanners keep upstream IDs (`CKV_K8S_20`). |
+| origin | `graph` or `scanner`. Not two finding types. |
+| severity / `severity_floor` | `critical` \| `high` \| `medium` \| `low` on Finding and Verdict. Floor is deterministic. LLM may raise, never lower. |
+| Verdict | LLM output for one Finding: `severity`, `explanation`, `suggested_fix`, `confidence` |
+| GateDecision | PR-level outcome: `risk` (`low` \| `medium` \| `high`), `verdicts`, `reason`. Not a Finding. |
+| risk | GateDecision only (`low` \| `medium` \| `high`). Do not call this severity. Maps to status `success` / `neutral` / `failure`. |
+| needs human review | Parse-failure outcome. Not a `risk` value. Never treat as safe. |
+| Provider | LLM backend protocol (`complete`). Implementations: `GeminiProvider`, `GroqProvider`, `OllamaProvider`. |
+| Scanner | Subprocess Checkov / Trivy / kube-linter. Missing binary: warn and continue. |
+| Action | Closed remediation enum: `rollback`, `bump_memory`, `restart`, `scale_out`, `escalate`. Python members `ROLLBACK` etc. are the same enum, not a second set. CRD `allowedActions` uses the values. |
+| RemediationPolicy | CRD `impactgate.io/v1`. Namespace policy for the controller. |
+| mode | Policy field: `dry-run` or `enforce`. Default if no policy: `dry-run` with no allowed actions. |
+
+Do not use: issue, violation, alert, report (as type names); command (as something the LLM emits); marketplace/org/user (no such models).
