@@ -95,13 +95,19 @@ The label gate reads **pod** labels. Set `impactgate.io/managed: "true"` on `spe
 
 One Python package (`impactgate`). Modules talk by import, not by network.
 
-```text
-YAML  →  Resource graph (networkx)  →  integrity checks + blast radius
-changed files  →  Checkov / Trivy / kube-linter
-findings only  →  LLM (explain, rank, optional patch; never discover)
-             ↘  PR comment + status `impact-gate`
-             ↘  controller Action enum (rollback / restart / … / escalate)
+```mermaid
+flowchart TD
+    manifests[Manifests] --> graph[Resource graph]
+    graph --> blast[Blast radius]
+    graph --> scanners[Scanners]
+    blast --> findings[Findings]
+    scanners --> findings
+    findings --> llm[LLM]
+    llm --> pr[PR gate]
+    llm --> controller[Controller]
 ```
+
+The detailed webhook pipeline and `GateDecision` state machine are in **[AGENTS.md](AGENTS.md)** (§19–§20).
 
 1. Parse manifests to `Resource` objects; fail closed if a file cannot be understood (needs human review, never “safe”).
 2. Build a `DiGraph` at the before SHA and the after SHA. Edges include `SELECTS`, `ROUTES_TO`, mounts, env, RBAC, HPA, NetworkPolicy, images. Unresolved targets stay in the graph as `MISSING`.
