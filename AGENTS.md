@@ -578,3 +578,91 @@ Enums and rule names stay English `snake_case` in code. There is no translated U
 | mode | Policy field: `dry-run` or `enforce`. Default if no policy: `dry-run` with no allowed actions. |
 
 Do not use: issue, violation, alert, report (as type names); command (as something the LLM emits); marketplace/org/user (no such models).
+
+---
+
+## 19. Core flow
+
+Distinctive pipeline: full-repo graph at both SHAs, then blast radius. Scanners and LLM are downstream of that. The README shows a simplified 8-node view; this is the webhook pipeline.
+
+```mermaid
+flowchart TD
+    ev["POST /webhook pull_request opened/synchronize"]
+    hmac{"X-Hub-Signature-256 valid?"}
+    hmac -->|no| unauth["401"]
+    hmac -->|yes| ack["200 + background"]
+    ack --> clone["Shallow fetch base SHA and head SHA"]
+    clone --> parseB["YAML to Resource at base"]
+    clone --> parseA["YAML to Resource at head"]
+    parseB --> gB["DiGraph before"]
+    parseA --> gA["DiGraph after"]
+    parseA -->|unparseable| failClosed["needs human review"]
+    gB --> diff["Diff changed nodes + changed files"]
+    gA --> diff
+    gA --> rules["Integrity checks on after"]
+    gB --> rules
+    rules --> introduced["Keep Findings not present in before"]
+    introduced --> walk["Reverse reachability depth 5"]
+    walk --> floor["severity_floor including externally exposed"]
+    diff --> scanners["Checkov Trivy kube-linter on changed files only"]
+    scanners --> merge["Dedupe Findings same rule + resource"]
+    floor --> merge
+    merge --> llm["LLM Verdicts batched by rule max 10"]
+    llm --> gate["GateDecision"]
+    gate --> comment["Update PR comment + Mermaid"]
+    gate --> status["Set impact-gate success/neutral/failure"]
+```
+
+### Classifier / bind rules
+
+| Stage | Inputs | Outputs | Bind vs fork |
+|---|---|---|---|
+| Edge extract | `list[Resource]` | `list[Edge]` | Bind in place. Unresolved target → `MISSING`, do not fork a second graph |
+| Integrity checks | after graph (+ before for `unreachable_workload`) | Findings `origin=graph` | Bind to the Service / Ingress / workload that broke |
+| Scanners | changed files | Findings `origin=scanner` | Bind to the Resource in that file. Missing binary: skip, do not fail the run |
+| LLM | Finding + diff hunk + namespace + exposed flag | Verdict JSON | Bind to `finding_id`. Forbidden: new Findings. `suggested_fix` null if not confident |
+| Controller classifier | pod logs/events, workload, ReplicaSet history | one `Action` | Bind to that workload. Forbidden: generated shell/`kubectl`. Guardrails may replace choice with `escalate` |
+
+Namespace: a reference without namespace resolves in the referring Resource’s namespace. Unresolvable cross-namespace reference is a Finding, not a silent miss.
+
+---
+
+## 20. GateDecision state machine
+
+Main CI entity is `GateDecision` (aggregation of Findings → Verdicts). Findings have no status field; they exist or they are dropped as pre-existing.
+
+```mermaid
+stateDiagram-v2
+    [*] --> analyzing: pull_request opened or synchronize
+    analyzing --> needs_human_review: parse error
+    analyzing --> low: risk low
+    analyzing --> medium: risk medium
+    analyzing --> high: risk high
+    needs_human_review --> [*]: never check success
+    low --> [*]: impact-gate success
+    medium --> [*]: impact-gate neutral
+    high --> [*]: impact-gate failure
+```
+
+Controller `Action` is a separate machine: `rollback` | `bump_memory` | `restart` | `scale_out` | `escalate`.
+
+| Status (code) | Meaning |
+|---|---|
+| `analyzing` | Background task running; HTTP already returned 200 |
+| `needs_human_review` | Graph builder could not understand a file. Fail closed |
+| `low` | `GateDecision.risk`; status `success` |
+| `medium` | `GateDecision.risk`; status `neutral` |
+| `high` | `GateDecision.risk`; status `failure` |
+| `critical` / `high` / `medium` / `low` | Finding/Verdict **severity**, not GateDecision risk |
+
+### Transition rules
+
+1. Source of truth is `GateDecision` computed from Findings. The PR comment is a render. Redirects and UI do not exist and must not become SoT.
+2. Ignore webhook events other than `pull_request` `opened` / `synchronize` (HTTP 200, no analysis).
+3. Integrity checks run on the **after** graph. Drop any Finding that already existed on **before**.
+4. LLM may raise `Verdict.severity` above `severity_floor`. Code must reject a lower value. Prompt is not the enforcement.
+5. Parse failure → `needs_human_review`. Forbidden: mapping that to risk `low` or status `success`.
+6. Status check mapping is fixed: `low`→`success`, `medium`→`neutral`, `high`→`failure`. Forbidden: inventing `critical` as a `risk` value.
+7. Dangling edges stay in the graph with `MISSING`. Forbidden: omitting them because the target Resource is absent.
+8. One PR comment, found by a hidden HTML marker, updated in place. Forbidden: a new comment per push.
+9. Controller: no `RemediationPolicy` → `dry-run` and empty `allowedActions`. `enforce` must be explicit. Unlabelled workloads (`impactgate.io/managed` ≠ `"true"`) are not acted on. Confidence below `minConfidence` (default 0.8) → `escalate`. Circuit breaker default: 2 actions per workload per hour. `rollback` only onto a ReplicaSet that was fully ready for ≥10 minutes; else `escalate`.
