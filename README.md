@@ -97,14 +97,14 @@ One Python package (`impactgate`). Modules talk by import, not by network.
 
 ```mermaid
 flowchart TD
-    manifests[Manifests] --> graph[Resource graph]
-    graph --> blast[Blast radius]
-    graph --> scanners[Scanners]
-    blast --> findings[Findings]
+    manifests["Manifests"] --> resGraph["Resource graph"]
+    resGraph --> blast["Blast radius"]
+    resGraph --> scanners["Scanners"]
+    blast --> findings["Findings"]
     scanners --> findings
-    findings --> llm[LLM]
-    llm --> pr[PR gate]
-    llm --> controller[Controller]
+    findings --> llm["LLM"]
+    llm --> prGate["PR gate"]
+    llm --> controller["Controller"]
 ```
 
 The detailed webhook pipeline and `GateDecision` state machine are in **[AGENTS.md](AGENTS.md)** (§19–§20).
